@@ -521,7 +521,7 @@ class MazePopulation:
                 d.step(dt, maze)
                 if d.is_alive:
                     any_alive = True
-        return (not any_alive) or (self.step_count >= self.max_steps)
+        return not any_alive
 
     def evaluate_fitness(self) -> None:
         for d in self.drones:
@@ -820,7 +820,7 @@ def run_maze_simulation(
                 f"Exit Reached : {reached_count} drones",
                 f"Best Progress: {best_prog:.1f}% along maze path",
                 f"Pulse Rate   : {best_drone.recent_ping_freq:.1f} Hz [10-150 Hz]",
-                f"Step / Limit : {pop.step_count} / {pop.max_steps}",
+                f"Step Count   : {pop.step_count} (unlimited)",
             ]
 
             yo = 34

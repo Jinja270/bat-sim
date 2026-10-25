@@ -176,8 +176,7 @@ def run_maze_hud_window(steps_limit: Optional[int] = None) -> None:
         screen.blit(t_echo, (24, grid_y + 152))
 
         # Row 7: Steps
-        step_pct = (step / max(1, max_steps)) * 100.0
-        t_steps = body_font.render(f"Step / Limit: {step} / {max_steps} ({step_pct:.0f}%)", True, COLOR_MUTED)
+        t_steps = body_font.render(f"Simulation Step: {step} (no step limit)", True, COLOR_MUTED)
         screen.blit(t_steps, (24, grid_y + 174))
 
         # Row 8: Ray Mode & Shortcuts summary

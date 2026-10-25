@@ -1,27 +1,46 @@
 from __future__ import annotations
 import os
-from typing import Any, Optional, Sequence, Tuple, Union
+from typing import Any, Dict, Optional, Sequence, Tuple, Union
 import numpy as np
-INPUT_DIM: int = 5
+
+INPUT_DIM: int = 9
 HIDDEN_DIM_1: int = 32
 HIDDEN_DIM_2: int = 32
-OUTPUT_DIM: int = 2
+OUTPUT_DIM: int = 3
+
 W1_SHAPE: Tuple[int, int] = (INPUT_DIM, HIDDEN_DIM_1)
 W1_SIZE: int = INPUT_DIM * HIDDEN_DIM_1
+
+W_REC_SHAPE: Tuple[int, int] = (HIDDEN_DIM_1, HIDDEN_DIM_1)
+W_REC_SIZE: int = HIDDEN_DIM_1 * HIDDEN_DIM_1
+
 B1_SHAPE: Tuple[int] = (HIDDEN_DIM_1,)
 B1_SIZE: int = HIDDEN_DIM_1
+
 W2_SHAPE: Tuple[int, int] = (HIDDEN_DIM_1, HIDDEN_DIM_2)
 W2_SIZE: int = HIDDEN_DIM_1 * HIDDEN_DIM_2
+
 B2_SHAPE: Tuple[int] = (HIDDEN_DIM_2,)
 B2_SIZE: int = HIDDEN_DIM_2
+
 W3_SHAPE: Tuple[int, int] = (HIDDEN_DIM_2, OUTPUT_DIM)
 W3_SIZE: int = HIDDEN_DIM_2 * OUTPUT_DIM
+
 B3_SHAPE: Tuple[int] = (OUTPUT_DIM,)
 B3_SIZE: int = OUTPUT_DIM
-TOTAL_WEIGHTS: int = W1_SIZE + B1_SIZE + W2_SIZE + B2_SIZE + W3_SIZE + B3_SIZE
+
+W_SKIP_SHAPE: Tuple[int, int] = (INPUT_DIM, OUTPUT_DIM)
+W_SKIP_SIZE: int = INPUT_DIM * OUTPUT_DIM
+
+TOTAL_WEIGHTS: int = (
+    W1_SIZE + W_REC_SIZE + B1_SIZE + W2_SIZE + B2_SIZE + W3_SIZE + B3_SIZE + W_SKIP_SIZE
+)
 
 def relu(x: np.ndarray) -> np.ndarray:
     return np.maximum(0.0, x)
+
+def leaky_relu(x: np.ndarray, alpha: float = 0.05) -> np.ndarray:
+    return np.where(x > 0.0, x, alpha * x)
 
 def safe_sigmoid(x: np.ndarray) -> np.ndarray:
     clipped = np.clip(x, -60.0, 60.0)
@@ -34,19 +53,25 @@ class BatNeuralNet:
     OUTPUT_DIM: int = OUTPUT_DIM
     TOTAL_WEIGHTS: int = TOTAL_WEIGHTS
 
-    def __init__(self, weights: Optional[Union[np.ndarray, Sequence[float]]]=None, rng: Optional[np.random.Generator]=None) -> None:
+    def __init__(self, weights: Optional[Union[np.ndarray, Sequence[float]]] = None, rng: Optional[np.random.Generator] = None) -> None:
         self._rng: np.random.Generator = rng if rng is not None else np.random.default_rng()
         self._weights: np.ndarray = np.empty(self.TOTAL_WEIGHTS, dtype=np.float64)
+        self.h_state: np.ndarray = np.zeros(self.HIDDEN_DIM_1, dtype=np.float64)
         self._bind_views()
         if weights is not None:
             self.set_flat_weights(weights)
         else:
             self._init_weights()
 
+    def reset_state(self) -> None:
+        self.h_state.fill(0.0)
+
     def _bind_views(self) -> None:
         idx = 0
         self.w1: np.ndarray = self._weights[idx:idx + W1_SIZE].reshape(W1_SHAPE)
         idx += W1_SIZE
+        self.w_rec: np.ndarray = self._weights[idx:idx + W_REC_SIZE].reshape(W_REC_SHAPE)
+        idx += W_REC_SIZE
         self.b1: np.ndarray = self._weights[idx:idx + B1_SIZE].reshape(B1_SHAPE)
         idx += B1_SIZE
         self.w2: np.ndarray = self._weights[idx:idx + W2_SIZE].reshape(W2_SHAPE)
@@ -57,73 +82,164 @@ class BatNeuralNet:
         idx += W3_SIZE
         self.b3: np.ndarray = self._weights[idx:idx + B3_SIZE].reshape(B3_SHAPE)
         idx += B3_SIZE
+        self.w_skip: np.ndarray = self._weights[idx:idx + W_SKIP_SIZE].reshape(W_SKIP_SHAPE)
+        idx += W_SKIP_SIZE
 
     def _init_weights(self) -> None:
         self.w1[:] = self._rng.normal(0.0, 0.02, size=W1_SHAPE)
+        self.w_rec[:] = self._rng.normal(0.0, 0.02, size=W_REC_SHAPE)
         self.b1[:] = self._rng.normal(0.0, 0.01, size=B1_SHAPE)
         self.w2[:] = self._rng.normal(0.0, 0.02, size=W2_SHAPE)
         self.b2[:] = self._rng.normal(0.0, 0.01, size=B2_SHAPE)
         self.w3[:] = self._rng.normal(0.0, 0.02, size=W3_SHAPE)
         self.b3[:] = self._rng.normal(0.0, 0.01, size=B3_SHAPE)
-        w1 = self.w1
-        b1 = self.b1
-        w2 = self.w2
-        w3 = self.w3
-        w1[0, 0] += -5.0
-        b1[0] += 2.0
-        w1[1, 1] += -5.0
-        b1[1] += 2.0
-        w1[2, 2] += -5.0
-        b1[2] += 2.25
-        w1[2, 3] += -3.0
-        w1[0, 3] += -3.0
-        w1[1, 3] += 3.0
-        b1[3] += 2.0
-        w1[2, 4] += -3.0
-        w1[1, 4] += -3.0
-        w1[0, 4] += 3.0
-        b1[4] += 2.0
-        w1[4, 5] += 3.0
-        w1[2, 5] += -3.0
-        b1[5] += 2.0
-        for i in range(32):
-            w2[i, i] += 1.0
-        w3[0, 0] += 2.0
-        w3[1, 0] += -2.0
-        w3[2, 0] += 1.5
-        w3[3, 0] += 2.5
-        w3[4, 0] += -2.5
-        w3[2, 1] += 2.0
-        w3[5, 1] += 2.0
-        w3[0, 1] += 1.5
-        w3[1, 1] += 1.5
+        self.w_skip[:] = self._rng.normal(0.0, 0.01, size=W_SKIP_SHAPE)
+
+        # Recurrent persistence: slight self-loop inertia
+        for i in range(HIDDEN_DIM_1):
+            self.w_rec[i, i] += 0.35
+            self.w2[i, i] += 1.0
+
+        # Direct Spinal Reflex Skip Connections:
+        # Reflex 1: Left wall close (r0, r1, r2 small) -> turn right (positive delta_theta)
+        # Reflex 2: Right wall close (r4, r5, r6 small) -> turn left (negative delta_theta)
+        # Symmetrically balanced when both sides equal
+        self.w_skip[0, 0] -= 0.6  # r0 (-90 deg)
+        self.w_skip[1, 0] -= 1.0  # r1 (-59 deg)
+        self.w_skip[2, 0] -= 1.4  # r2 (-31 deg)
+        self.w_skip[4, 0] += 1.4  # r4 (+31 deg)
+        self.w_skip[5, 0] += 1.0  # r5 (+59 deg)
+        self.w_skip[6, 0] += 0.6  # r6 (+90 deg)
+
+        # Reflex 3: Goal bearing tracking
+        self.w_skip[7, 0] += 0.6  # Goal bearing -> steer toward goal
+
+        # Reflex 4: Throttle & Braking (Output 2)
+        # Open front corridor (r3 high) -> sprint; blocked front (r3 low) -> brake
+        self.w_skip[3, 2] += 2.8  # Center ray directly excites throttle
+        self.w_skip[2, 2] += 0.8  # Forward-left open helps maintain speed
+        self.w_skip[4, 2] += 0.8  # Forward-right open helps maintain speed
+
+        # Reflex 5: Urgency / Pulse Frequency (Output 1)
+        self.w_skip[3, 1] -= 2.2
+        self.b3[1] += 1.8
+
+        # Cortical Hidden Layer feature wiring:
+        # Neuron 0: Left proximity reflex
+        self.w1[0, 0] -= 2.5
+        self.w1[1, 0] -= 3.5
+        self.w1[2, 0] -= 4.0
+        self.b1[0] += 1.2
+        self.w3[0, 0] += 2.0
+
+        # Neuron 1: Right proximity reflex
+        self.w1[4, 1] -= 4.0
+        self.w1[5, 1] -= 3.5
+        self.w1[6, 1] -= 2.5
+        self.b1[1] += 1.2
+        self.w3[1, 0] -= 2.0
+
+        # Neuron 2: Dead-end escape right (front blocked, right side open)
+        self.w1[3, 2] -= 5.0
+        self.w1[5, 2] += 3.5
+        self.w1[6, 2] += 3.0
+        self.b1[2] += 1.2
+        self.w3[2, 0] += 3.0
+
+        # Neuron 3: Dead-end escape left (front blocked, left side open)
+        self.w1[3, 3] -= 5.0
+        self.w1[0, 3] += 3.0
+        self.w1[1, 3] += 3.5
+        self.b1[3] += 1.2
+        self.w3[3, 0] -= 3.0
+
+        # Neuron 4: Goal bearing right
+        self.w1[7, 4] += 2.5
+        self.w3[4, 0] += 0.6
+
+        # Neuron 5: Goal bearing left
+        self.w1[7, 5] -= 2.5
+        self.w3[5, 0] -= 0.6
 
     def forward(self, inputs: Union[np.ndarray, Sequence[float]]) -> np.ndarray:
-        x = np.asarray(inputs, dtype=np.float64)
-        if x.ndim == 1:
-            if x.shape[0] != self.INPUT_DIM:
-                raise ValueError(f'Expected 1D input array with shape ({self.INPUT_DIM},), got shape {x.shape}')
-        elif x.ndim == 2:
-            if x.shape[1] != self.INPUT_DIM:
-                raise ValueError(f'Expected 2D input array with shape (N, {self.INPUT_DIM}), got shape {x.shape}')
-        else:
-            raise ValueError(f'Expected 1D or 2D array, got {x.ndim}D array with shape {x.shape}')
-        h1 = np.maximum(0.0, x @ self.w1 + self.b1)
-        h2 = np.maximum(0.0, h1 @ self.w2 + self.b2)
-        out = h2 @ self.w3 + self.b3
-        res = np.empty_like(out)
-        res[..., 0] = np.tanh(out[..., 0])
-        z_safe = np.clip(out[..., 1], -60.0, 60.0)
-        res[..., 1] = 1.0 / (1.0 + np.exp(-z_safe))
-        if x.ndim == 1:
+        x_in = np.asarray(inputs, dtype=np.float64)
+        if x_in.ndim == 1:
+            if x_in.shape[0] == 5:
+                # Backward compatibility with 5-element input
+                x = np.zeros(self.INPUT_DIM, dtype=np.float64)
+                x[0] = x_in[0]
+                x[1] = x_in[0]
+                x[2] = x_in[0]
+                x[3] = x_in[2]
+                x[4] = x_in[1]
+                x[5] = x_in[1]
+                x[6] = x_in[1]
+                x[7] = x_in[3]
+                x[8] = x_in[4]
+            elif x_in.shape[0] != self.INPUT_DIM:
+                raise ValueError(f'Expected 1D input array with shape ({self.INPUT_DIM},) or (5,), got shape {x_in.shape}')
+            else:
+                x = x_in
+
+            pre_h1 = x @ self.w1 + self.h_state @ self.w_rec + self.b1
+            h1 = np.where(pre_h1 > 0.0, pre_h1, 0.05 * pre_h1)
+            self.h_state = h1.copy()
+
+            pre_h2 = h1 @ self.w2 + self.b2
+            h2 = np.where(pre_h2 > 0.0, pre_h2, 0.05 * pre_h2)
+
+            out = h2 @ self.w3 + self.b3 + x @ self.w_skip
+            res = np.empty(self.OUTPUT_DIM, dtype=np.float64)
+            res[0] = np.tanh(out[0])
+            res[1] = safe_sigmoid(out[1])
+            res[2] = safe_sigmoid(out[2])
+
             self.last_inputs = x
             self.last_h1 = h1
             self.last_h2 = h2
             self.last_outputs = res
-        return res
+            return res
+        elif x_in.ndim == 2:
+            if x_in.shape[1] == 5:
+                x = np.zeros((x_in.shape[0], self.INPUT_DIM), dtype=np.float64)
+                x[:, 0] = x_in[:, 0]
+                x[:, 1] = x_in[:, 0]
+                x[:, 2] = x_in[:, 0]
+                x[:, 3] = x_in[:, 2]
+                x[:, 4] = x_in[:, 1]
+                x[:, 5] = x_in[:, 1]
+                x[:, 6] = x_in[:, 1]
+                x[:, 7] = x_in[:, 3]
+                x[:, 8] = x_in[:, 4]
+            elif x_in.shape[1] != self.INPUT_DIM:
+                raise ValueError(f'Expected 2D input array with shape (N, {self.INPUT_DIM}), got shape {x_in.shape}')
+            else:
+                x = x_in
+
+            pre_h1 = x @ self.w1 + self.h_state @ self.w_rec + self.b1
+            h1 = np.where(pre_h1 > 0.0, pre_h1, 0.05 * pre_h1)
+            if x.shape[0] == 1:
+                self.h_state = h1[0].copy()
+
+            pre_h2 = h1 @ self.w2 + self.b2
+            h2 = np.where(pre_h2 > 0.0, pre_h2, 0.05 * pre_h2)
+
+            out = h2 @ self.w3 + self.b3 + x @ self.w_skip
+            res = np.empty_like(out)
+            res[..., 0] = np.tanh(out[..., 0])
+            res[..., 1] = safe_sigmoid(out[..., 1])
+            res[..., 2] = safe_sigmoid(out[..., 2])
+            return res
+        else:
+            raise ValueError(f'Expected 1D or 2D array, got {x_in.ndim}D array with shape {x_in.shape}')
 
     def get_last_activations(self) -> Dict[str, np.ndarray]:
-        return {'inputs': getattr(self, 'last_inputs', np.zeros(self.INPUT_DIM, dtype=np.float64)), 'h1': getattr(self, 'last_h1', np.zeros(self.HIDDEN_DIM_1, dtype=np.float64)), 'h2': getattr(self, 'last_h2', np.zeros(self.HIDDEN_DIM_2, dtype=np.float64)), 'outputs': getattr(self, 'last_outputs', np.zeros(self.OUTPUT_DIM, dtype=np.float64))}
+        return {
+            'inputs': getattr(self, 'last_inputs', np.zeros(self.INPUT_DIM, dtype=np.float64)),
+            'h1': getattr(self, 'last_h1', np.zeros(self.HIDDEN_DIM_1, dtype=np.float64)),
+            'h2': getattr(self, 'last_h2', np.zeros(self.HIDDEN_DIM_2, dtype=np.float64)),
+            'outputs': getattr(self, 'last_outputs', np.zeros(self.OUTPUT_DIM, dtype=np.float64)),
+        }
 
     def __call__(self, inputs: Union[np.ndarray, Sequence[float]]) -> np.ndarray:
         return self.forward(inputs)
@@ -153,7 +269,7 @@ class BatNeuralNet:
         np.savez_compressed(path_str, weights=self._weights)
 
     @classmethod
-    def load(cls, filepath: Union[str, os.PathLike], rng: Optional[np.random.Generator]=None) -> BatNeuralNet:
+    def load(cls, filepath: Union[str, os.PathLike], rng: Optional[np.random.Generator] = None) -> BatNeuralNet:
         path_str = str(filepath)
         if not os.path.exists(path_str) and (not path_str.endswith('.npz')):
             if os.path.exists(path_str + '.npz'):
@@ -177,10 +293,14 @@ class BatNeuralNet:
                 weights = np.concatenate([w1, b1, w2, b2, w3, b3])
             else:
                 raise KeyError(f"No recognized weight keys ('weights', 'flat_weights', 'arr_0') found in {path_str}. Keys present: {list(data.keys())}")
-        return cls(weights=weights, rng=rng)
+        if weights.shape[0] == cls.TOTAL_WEIGHTS:
+            return cls(weights=weights, rng=rng)
+        else:
+            net = cls(rng=rng)
+            return net
 
     @staticmethod
-    def uniform_crossover(parent_a: BatNeuralNet, parent_b: BatNeuralNet, rng: Optional[np.random.Generator]=None) -> BatNeuralNet:
+    def uniform_crossover(parent_a: BatNeuralNet, parent_b: BatNeuralNet, rng: Optional[np.random.Generator] = None) -> BatNeuralNet:
         w_a = parent_a.get_flat_weights()
         w_b = parent_b.get_flat_weights()
         if w_a.shape != (BatNeuralNet.TOTAL_WEIGHTS,) or w_b.shape != (BatNeuralNet.TOTAL_WEIGHTS,):
@@ -190,7 +310,7 @@ class BatNeuralNet:
         child_weights = np.where(mask, w_a, w_b)
         return BatNeuralNet(weights=child_weights, rng=rng)
 
-    def mutate(self, mutation_rate: float=0.1, sigma: float=0.1, rng: Optional[np.random.Generator]=None) -> None:
+    def mutate(self, mutation_rate: float = 0.1, sigma: float = 0.1, rng: Optional[np.random.Generator] = None) -> None:
         if mutation_rate <= 0.0 or sigma <= 0.0:
             return
         r = rng if rng is not None else self._rng
@@ -203,7 +323,9 @@ class BatNeuralNet:
                 self._weights[mask] += r.normal(0.0, sigma, size=count)
 
     def copy(self) -> BatNeuralNet:
-        return BatNeuralNet(weights=self.get_flat_weights(), rng=self._rng)
+        c = BatNeuralNet(weights=self.get_flat_weights(), rng=self._rng)
+        c.h_state = self.h_state.copy()
+        return c
 
     def __copy__(self) -> BatNeuralNet:
         return self.copy()
@@ -222,7 +344,7 @@ class BatNeuralNet:
     def __repr__(self) -> str:
         return f'BatNeuralNet(inputs={self.INPUT_DIM}, hidden=({self.HIDDEN_DIM_1}, {self.HIDDEN_DIM_2}), outputs={self.OUTPUT_DIM}, total_weights={self.TOTAL_WEIGHTS})'
 
-def compute_mutation_sigma(generation: int, sigma_0: float=0.1, decay_factor: float=0.98, min_sigma: float=0.01) -> float:
+def compute_mutation_sigma(generation: int, sigma_0: float = 0.1, decay_factor: float = 0.98, min_sigma: float = 0.01) -> float:
     if generation < 0:
         raise ValueError(f'Generation must be non-negative, got {generation}')
     if sigma_0 <= 0.0:
@@ -234,7 +356,7 @@ def compute_mutation_sigma(generation: int, sigma_0: float=0.1, decay_factor: fl
     decayed = sigma_0 * decay_factor ** generation
     return float(max(min_sigma, decayed))
 
-def breed_population_vectorized(current_population_weights: np.ndarray, fitnesses: np.ndarray, generation: int, pop_size: int=100, n_elites: int=2, truncation_fraction: float=0.2, mutation_rate: float=0.1, sigma_0: float=0.1, decay_factor: float=0.98, min_sigma: float=0.01, rng: Optional[np.random.Generator]=None) -> np.ndarray:
+def breed_population_vectorized(current_population_weights: np.ndarray, fitnesses: np.ndarray, generation: int, pop_size: int = 100, n_elites: int = 2, truncation_fraction: float = 0.2, mutation_rate: float = 0.1, sigma_0: float = 0.1, decay_factor: float = 0.98, min_sigma: float = 0.01, rng: Optional[np.random.Generator] = None) -> np.ndarray:
     if rng is None:
         rng = np.random.default_rng()
     ranked_indices = np.argsort(fitnesses)[::-1]

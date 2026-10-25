@@ -297,7 +297,7 @@ class MazeDrone:
         self.urgency = 0.0
         self.delta_theta = 0.0
 
-        self.last_dists = [self.max_range, self.max_range, self.max_range]
+        self.last_dists = [self.max_range] * 7
         self.wavefronts: List[float] = []
 
     def reset(self, x: float, y: float, heading: float) -> None:
@@ -318,8 +318,10 @@ class MazeDrone:
         self.ping_timer = 0.0
         self.urgency = 0.0
         self.delta_theta = 0.0
-        self.last_dists = [self.max_range, self.max_range, self.max_range]
+        self.last_dists = [self.max_range] * 7
         self.wavefronts.clear()
+        if hasattr(self.controller, 'reset_state'):
+            self.controller.reset_state()
 
     def step(self, dt: float, maze: Maze) -> None:
         if not self.is_alive:
@@ -334,34 +336,31 @@ class MazeDrone:
             self.ping_timer = 0.0
             self.wavefronts.append(0.0)
 
-            ray_angles = (-math.pi * 0.35, -math.pi * 0.17, 0.0, math.pi * 0.17, math.pi * 0.35)
+            ray_angles = (-math.pi * 0.50, -math.pi * 0.33, -math.pi * 0.17, 0.0, math.pi * 0.17, math.pi * 0.33, math.pi * 0.50)
             dists = [maze.raycast(self.x, self.y, self.heading + off, self.max_range) for off in ray_angles]
-            self.last_dists = [dists[1], dists[2], dists[3]]
+            self.last_dists = dists
 
-            dL = min(dists[0], dists[1]) / self.max_range
-            dF = dists[2] / self.max_range
-            dR = min(dists[3], dists[4]) / self.max_range
+            inv_max = 1.0 / self.max_range
+            r_norm = [d * inv_max for d in dists]
 
             dx = maze.goal_pos[0] - self.x
             dy = maze.goal_pos[1] - self.y
             target_ang = math.atan2(dy, dx)
             bearing = (target_ang - self.heading + math.pi) % (2.0 * math.pi) - math.pi
             norm_bearing = bearing / math.pi
-            norm_v = self.speed / 100.0
+            norm_v = self.speed / 85.0
 
-            raw_in = np.array([dL, dR, dF, norm_bearing, norm_v], dtype=np.float64)
+            raw_in = np.array(r_norm + [norm_bearing, norm_v], dtype=np.float64)
             out = self.controller.forward(raw_in)
 
             self.delta_theta = float(out[0])
             self.urgency = float(out[1])
+            throttle = float(out[2]) if len(out) > 2 else 0.5
+            self.speed = 40.0 + 45.0 * throttle
             self.recent_ping_freq = 10.0 + 140.0 * self.urgency
 
-        # Dynamic speed: throttle down when approaching wall in front
-        dF_val = self.last_dists[1] / self.max_range if self.last_dists else 1.0
-        effective_speed = self.speed * (0.35 + 0.65 * min(1.0, dF_val * 2.5))
-
         self.heading = (self.heading + self.delta_theta * self.turning_rate_scale * dt) % (2.0 * math.pi)
-        step_dist = effective_speed * dt
+        step_dist = self.speed * dt
         self.x += step_dist * math.cos(self.heading)
         self.y += step_dist * math.sin(self.heading)
         self.distance_traveled += step_dist
@@ -410,7 +409,7 @@ class MazeDrone:
                 surface.blit(wave_surf, (ix - int(w + 2), iy - int(w + 2)))
 
         if draw_rays and self.is_alive:
-            ray_offsets = (-math.pi / 5.2, 0.0, math.pi / 5.2)
+            ray_offsets = (-math.pi * 0.50, -math.pi * 0.33, -math.pi * 0.17, 0.0, math.pi * 0.17, math.pi * 0.33, math.pi * 0.50)
             for d, off in zip(self.last_dists, ray_offsets):
                 ang = self.heading + off
                 ex = self.x + d * math.cos(ang)
@@ -454,76 +453,39 @@ class MazePopulation:
         self.drones.clear()
         for _ in range(self.size):
             net = BatNeuralNet(rng=self.rng)
-            net.w1[:] = self.rng.normal(0.0, 0.02, size=net.w1.shape)
-            net.b1[:] = 0.0
-            net.w2[:] = self.rng.normal(0.0, 0.02, size=net.w2.shape)
-            for i in range(32):
-                net.w2[i, i] += 1.0
-            net.b2[:] = 0.0
-            net.w3[:] = self.rng.normal(0.0, 0.02, size=net.w3.shape)
-            net.b3[:] = 0.0
-
-            # 1. Left wall close -> steer right
-            net.w1[0, 0] += -3.5
-            net.w1[1, 0] += +1.5
-            net.b1[0] += +0.4
-            net.w3[0, 0] += +2.5
-
-            # 2. Right wall close -> steer left
-            net.w1[0, 1] += +1.5
-            net.w1[1, 1] += -3.5
-            net.b1[1] += +0.4
-            net.w3[1, 0] += -2.5
-
-            # 3. Front blocked + right open -> steer right hard
-            net.w1[2, 2] += -5.0
-            net.w1[1, 2] += +3.5
-            net.b1[2] += +1.2
-            net.w3[2, 0] += +3.5
-
-            # 4. Front blocked + left open -> steer left hard
-            net.w1[2, 3] += -5.0
-            net.w1[0, 3] += +3.5
-            net.b1[3] += +1.2
-            net.w3[3, 0] += -3.5
-
-            # 5. Goal bearing right -> steer right
-            net.w1[3, 4] += +2.0
-            net.w3[4, 0] += +0.6
-
-            # 6. Goal bearing left -> steer left
-            net.w1[3, 5] += -2.0
-            net.w3[5, 0] += -0.6
-
-            net.b3[1] += 2.0
-
             flat = net.get_flat_weights()
-            flat += self.rng.normal(0.0, 0.06, size=flat.shape)
+            flat += self.rng.normal(0.0, 0.05, size=flat.shape)
             net.set_flat_weights(flat)
-
             d = MazeDrone(x=0.0, y=0.0, heading=0.0, controller=net)
             self.drones.append(d)
         self._sync_vectors()
 
     def _sync_vectors(self) -> None:
-        self.W1 = np.zeros((self.size, 5, 32), dtype=np.float64)
+        self.W1 = np.zeros((self.size, 9, 32), dtype=np.float64)
+        self.W_rec = np.zeros((self.size, 32, 32), dtype=np.float64)
         self.B1 = np.zeros((self.size, 1, 32), dtype=np.float64)
         self.W2 = np.zeros((self.size, 32, 32), dtype=np.float64)
         self.B2 = np.zeros((self.size, 1, 32), dtype=np.float64)
-        self.W3 = np.zeros((self.size, 32, 2), dtype=np.float64)
-        self.B3 = np.zeros((self.size, 1, 2), dtype=np.float64)
-        self.raw_inputs = np.zeros((self.size, 1, 5), dtype=np.float64)
+        self.W3 = np.zeros((self.size, 32, 3), dtype=np.float64)
+        self.B3 = np.zeros((self.size, 1, 3), dtype=np.float64)
+        self.W_skip = np.zeros((self.size, 9, 3), dtype=np.float64)
+        self.H_states = np.zeros((self.size, 1, 32), dtype=np.float64)
+        self.raw_inputs = np.zeros((self.size, 1, 9), dtype=np.float64)
         for i, d in enumerate(self.drones):
             c = d.controller
             self.W1[i] = c.w1
+            self.W_rec[i] = c.w_rec
             self.B1[i, 0] = c.b1
             self.W2[i] = c.w2
             self.B2[i, 0] = c.b2
             self.W3[i] = c.w3
             self.B3[i, 0] = c.b3
+            self.W_skip[i] = c.w_skip
+            self.H_states[i, 0] = c.h_state
 
     def reset_at_maze(self, maze: Maze) -> None:
         self.step_count = 0
+        self.H_states.fill(0.0)
         sx, sy = maze.start_pos
         for drone in self.drones:
             px = sx + float(self.rng.uniform(-6.0, 6.0))
@@ -540,7 +502,7 @@ class MazePopulation:
         ping_indices = []
         inv_max_range = 1.0 / 240.0
         gx, gy = maze.goal_pos
-        RAY_OFFSETS = (-math.pi * 0.35, -math.pi * 0.17, 0.0, math.pi * 0.17, math.pi * 0.35)
+        RAY_OFFSETS = (-math.pi * 0.50, -math.pi * 0.33, -math.pi * 0.17, 0.0, math.pi * 0.17, math.pi * 0.33, math.pi * 0.50)
 
         for i in alive_indices:
             d = self.drones[i]
@@ -553,47 +515,63 @@ class MazePopulation:
                 h = d.heading
                 r0 = maze.raycast(d.x, d.y, h + RAY_OFFSETS[0], 240.0)
                 r1 = maze.raycast(d.x, d.y, h + RAY_OFFSETS[1], 240.0)
-                r2 = maze.raycast(d.x, d.y, h, 240.0)
-                r3 = maze.raycast(d.x, d.y, h + RAY_OFFSETS[3], 240.0)
+                r2 = maze.raycast(d.x, d.y, h + RAY_OFFSETS[2], 240.0)
+                r3 = maze.raycast(d.x, d.y, h, 240.0)
                 r4 = maze.raycast(d.x, d.y, h + RAY_OFFSETS[4], 240.0)
-                d.last_dists = [r1, r2, r3]
-
-                dL = min(r0, r1) * inv_max_range
-                dF = r2 * inv_max_range
-                dR = min(r3, r4) * inv_max_range
+                r5 = maze.raycast(d.x, d.y, h + RAY_OFFSETS[5], 240.0)
+                r6 = maze.raycast(d.x, d.y, h + RAY_OFFSETS[6], 240.0)
+                d.last_dists = [r0, r1, r2, r3, r4, r5, r6]
 
                 dx = gx - d.x
                 dy = gy - d.y
                 target_ang = math.atan2(dy, dx)
                 bearing = (target_ang - h + math.pi) % (2.0 * math.pi) - math.pi
 
-                self.raw_inputs[i, 0, 0] = dL
-                self.raw_inputs[i, 0, 1] = dR
-                self.raw_inputs[i, 0, 2] = dF
-                self.raw_inputs[i, 0, 3] = bearing / math.pi
-                self.raw_inputs[i, 0, 4] = d.speed * 0.01
+                self.raw_inputs[i, 0, 0] = r0 * inv_max_range
+                self.raw_inputs[i, 0, 1] = r1 * inv_max_range
+                self.raw_inputs[i, 0, 2] = r2 * inv_max_range
+                self.raw_inputs[i, 0, 3] = r3 * inv_max_range
+                self.raw_inputs[i, 0, 4] = r4 * inv_max_range
+                self.raw_inputs[i, 0, 5] = r5 * inv_max_range
+                self.raw_inputs[i, 0, 6] = r6 * inv_max_range
+                self.raw_inputs[i, 0, 7] = bearing / math.pi
+                self.raw_inputs[i, 0, 8] = d.speed / 85.0
 
         if ping_indices:
             p_idx = np.array(ping_indices, dtype=np.int32)
             X = self.raw_inputs[p_idx]
-            h1 = np.maximum(0.0, np.matmul(X, self.W1[p_idx]) + self.B1[p_idx])
-            h2 = np.maximum(0.0, np.matmul(h1, self.W2[p_idx]) + self.B2[p_idx])
-            out = np.matmul(h2, self.W3[p_idx]) + self.B3[p_idx]
+            H_prev = self.H_states[p_idx]
+
+            pre_h1 = np.matmul(X, self.W1[p_idx]) + np.matmul(H_prev, self.W_rec[p_idx]) + self.B1[p_idx]
+            h1 = np.where(pre_h1 > 0.0, pre_h1, 0.05 * pre_h1)
+            self.H_states[p_idx] = h1
+
+            pre_h2 = np.matmul(h1, self.W2[p_idx]) + self.B2[p_idx]
+            h2 = np.where(pre_h2 > 0.0, pre_h2, 0.05 * pre_h2)
+
+            out = np.matmul(h2, self.W3[p_idx]) + self.B3[p_idx] + np.matmul(X, self.W_skip[p_idx])
+
             dthetas = np.tanh(out[:, 0, 0])
             urgs = 1.0 / (1.0 + np.exp(-np.clip(out[:, 0, 1], -60.0, 60.0)))
+            throttles = 1.0 / (1.0 + np.exp(-np.clip(out[:, 0, 2], -60.0, 60.0)))
+
             for k, i in enumerate(ping_indices):
                 d = self.drones[i]
                 d.delta_theta = float(dthetas[k])
                 d.urgency = float(urgs[k])
                 d.recent_ping_freq = 10.0 + 140.0 * d.urgency
+                d.speed = 40.0 + 45.0 * float(throttles[k])
+                d.controller.h_state = h1[k, 0].copy()
+                d.controller.last_inputs = X[k, 0].copy()
+                d.controller.last_h1 = h1[k, 0].copy()
+                d.controller.last_h2 = h2[k, 0].copy()
+                d.controller.last_outputs = np.array([dthetas[k], urgs[k], throttles[k]], dtype=np.float64)
 
         g_rad2 = maze.goal_radius * maze.goal_radius
         for i in alive_indices:
             d = self.drones[i]
-            dF_val = d.last_dists[1] * inv_max_range if d.last_dists else 1.0
-            eff_speed = d.speed * (0.35 + 0.65 * min(1.0, dF_val * 2.5))
             d.heading = (d.heading + d.delta_theta * d.turning_rate_scale * dt) % (2.0 * math.pi)
-            step_dist = eff_speed * dt
+            step_dist = d.speed * dt
             d.x += step_dist * math.cos(d.heading)
             d.y += step_dist * math.sin(d.heading)
             d.distance_traveled += step_dist
@@ -933,7 +911,7 @@ def run_maze_simulation(
                 f"Swarm Alive  : {alive_count} / {pop.size} ({alive_count/pop.size*100:.1f}%)",
                 f"Exit Reached : {reached_count} drones",
                 f"Best Progress: {best_prog:.1f}% along maze path",
-                f"Pulse Rate   : {best_drone.recent_ping_freq:.1f} Hz [10-150 Hz]",
+                f"Speed / Pulse: {best_drone.speed:.1f} px/s | {best_drone.recent_ping_freq:.1f} Hz",
                 f"Step Count   : {pop.step_count} (unlimited)",
             ]
 

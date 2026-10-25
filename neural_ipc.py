@@ -76,6 +76,10 @@ class ActivationWriter:
                     self.arr[84] = float(telem.get('fast_forward', 0.0))
                     self.arr[85] = float(telem.get('fps', 0.0))
                     self.arr[86] = float(telem.get('ray_mode', 0.0))
+                if len(u) >= 9:
+                    self.arr[87:96] = u[:9]
+                if len(out) >= 3:
+                    self.arr[96:99] = out[:3]
             except Exception:
                 pass
 

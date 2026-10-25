@@ -278,7 +278,7 @@ class MazeDrone:
         self.controller = controller if controller is not None else BatNeuralNet()
         self.radius = 6.0
         self.max_range = 240.0
-        self.turning_rate_scale = 3.6
+        self.turning_rate_scale = 5.5
 
         self.is_alive = True
         self.collided = False
@@ -287,6 +287,9 @@ class MazeDrone:
         self.distance_traveled = 0.0
         self.max_progress = 0.0
         self.fitness = 0.0
+
+        self.stagnant_steps = 0
+        self.last_progress_check = 0.0
 
         self.ping_freq = 10.0
         self.recent_ping_freq = 10.0
@@ -308,6 +311,8 @@ class MazeDrone:
         self.distance_traveled = 0.0
         self.max_progress = 0.0
         self.fitness = 0.0
+        self.stagnant_steps = 0
+        self.last_progress_check = 0.0
         self.ping_freq = 10.0
         self.recent_ping_freq = 10.0
         self.ping_timer = 0.0
@@ -321,13 +326,6 @@ class MazeDrone:
             return
 
         self.time_alive_steps += 1
-
-        if self.time_alive_steps > 90:
-            sx, sy = maze.start_pos
-            if math.hypot(self.x - sx, self.y - sy) < maze.cell_size * 0.9:
-                self.is_alive = False
-                self.collided = True
-                return
 
         self.ping_timer += dt
         ping_period = 1.0 / max(10.0, self.recent_ping_freq)
@@ -343,18 +341,27 @@ class MazeDrone:
             dL = min(dists[0], dists[1]) / self.max_range
             dF = dists[2] / self.max_range
             dR = min(dists[3], dists[4]) / self.max_range
-            norm_v = self.speed / 100.0
-            closing_approx = (self.max_range - dists[2]) / self.max_range
 
-            raw_in = np.array([dL, dR, dF, norm_v, closing_approx], dtype=np.float64)
+            dx = maze.goal_pos[0] - self.x
+            dy = maze.goal_pos[1] - self.y
+            target_ang = math.atan2(dy, dx)
+            bearing = (target_ang - self.heading + math.pi) % (2.0 * math.pi) - math.pi
+            norm_bearing = bearing / math.pi
+            norm_v = self.speed / 100.0
+
+            raw_in = np.array([dL, dR, dF, norm_bearing, norm_v], dtype=np.float64)
             out = self.controller.forward(raw_in)
 
             self.delta_theta = float(out[0])
             self.urgency = float(out[1])
             self.recent_ping_freq = 10.0 + 140.0 * self.urgency
 
+        # Dynamic speed: throttle down when approaching wall in front
+        dF_val = self.last_dists[1] / self.max_range if self.last_dists else 1.0
+        effective_speed = self.speed * (0.35 + 0.65 * min(1.0, dF_val * 2.5))
+
         self.heading = (self.heading + self.delta_theta * self.turning_rate_scale * dt) % (2.0 * math.pi)
-        step_dist = self.speed * dt
+        step_dist = effective_speed * dt
         self.x += step_dist * math.cos(self.heading)
         self.y += step_dist * math.sin(self.heading)
         self.distance_traveled += step_dist
@@ -362,6 +369,16 @@ class MazeDrone:
         prog = maze.get_progress(self.x, self.y)
         if prog > self.max_progress:
             self.max_progress = prog
+
+        if self.max_progress > self.last_progress_check + 0.005:
+            self.last_progress_check = self.max_progress
+            self.stagnant_steps = 0
+        else:
+            self.stagnant_steps += 1
+            if self.stagnant_steps > 180:
+                self.is_alive = False
+                self.collided = True
+                return
 
         gdx = self.x - maze.goal_pos[0]
         gdy = self.y - maze.goal_pos[1]
@@ -421,11 +438,14 @@ class MazeDrone:
 
 
 class MazePopulation:
-    def __init__(self, size: int = 100, max_steps: int = 650, seed: Optional[int] = None) -> None:
+    def __init__(self, size: int = 100, max_steps: int = 2500, seed: Optional[int] = None) -> None:
         self.size = int(size)
         self.max_steps = int(max_steps)
         self.step_count = 0
         self.generation = 0
+        self.stagnant_count = 0
+        self.all_time_best_progress = 0.0
+        self.all_time_best_controller: Optional[BatNeuralNet] = None
         self.rng = np.random.default_rng(seed)
         self.drones: List[MazeDrone] = []
         self._init_drones()
@@ -434,27 +454,51 @@ class MazePopulation:
         self.drones.clear()
         for _ in range(self.size):
             net = BatNeuralNet(rng=self.rng)
-            net.w1[:] = self.rng.normal(0.0, 0.08, size=net.w1.shape)
+            net.w1[:] = self.rng.normal(0.0, 0.02, size=net.w1.shape)
             net.b1[:] = 0.0
-            net.w2[:] = self.rng.normal(0.0, 0.08, size=net.w2.shape)
+            net.w2[:] = self.rng.normal(0.0, 0.02, size=net.w2.shape)
             for i in range(32):
                 net.w2[i, i] += 1.0
             net.b2[:] = 0.0
-            net.w3[:] = self.rng.normal(0.0, 0.08, size=net.w3.shape)
+            net.w3[:] = self.rng.normal(0.0, 0.02, size=net.w3.shape)
             net.b3[:] = 0.0
 
-            net.w1[0, 0] += -2.5
-            net.w1[1, 0] += +2.5
-            net.w3[0, 0] += +1.5
+            # 1. Left wall close -> steer right
+            net.w1[0, 0] += -3.5
+            net.w1[1, 0] += +1.5
+            net.b1[0] += +0.4
+            net.w3[0, 0] += +2.5
 
-            net.w1[2, 1] += -3.0
-            net.b1[1] += +1.2
-            net.w1[0, 1] += -1.5
-            net.w1[1, 1] += +1.5
-            net.w3[1, 0] += +1.8
+            # 2. Right wall close -> steer left
+            net.w1[0, 1] += +1.5
+            net.w1[1, 1] += -3.5
+            net.b1[1] += +0.4
+            net.w3[1, 0] += -2.5
+
+            # 3. Front blocked + right open -> steer right hard
+            net.w1[2, 2] += -5.0
+            net.w1[1, 2] += +3.5
+            net.b1[2] += +1.2
+            net.w3[2, 0] += +3.5
+
+            # 4. Front blocked + left open -> steer left hard
+            net.w1[2, 3] += -5.0
+            net.w1[0, 3] += +3.5
+            net.b1[3] += +1.2
+            net.w3[3, 0] += -3.5
+
+            # 5. Goal bearing right -> steer right
+            net.w1[3, 4] += +2.0
+            net.w3[4, 0] += +0.6
+
+            # 6. Goal bearing left -> steer left
+            net.w1[3, 5] += -2.0
+            net.w3[5, 0] += -0.6
+
+            net.b3[1] += 2.0
 
             flat = net.get_flat_weights()
-            flat += self.rng.normal(0.0, 0.12, size=flat.shape)
+            flat += self.rng.normal(0.0, 0.06, size=flat.shape)
             net.set_flat_weights(flat)
 
             d = MazeDrone(x=0.0, y=0.0, heading=0.0, controller=net)
@@ -464,10 +508,9 @@ class MazePopulation:
         self.step_count = 0
         sx, sy = maze.start_pos
         for drone in self.drones:
-            px = sx + float(self.rng.uniform(-10.0, 10.0))
-            py = sy + float(self.rng.uniform(-10.0, 10.0))
-            base_head = float(self.rng.choice([0.0, math.pi * 0.5]))
-            head = base_head + float(self.rng.uniform(-0.25, 0.25))
+            px = sx + float(self.rng.uniform(-6.0, 6.0))
+            py = sy + float(self.rng.uniform(-6.0, 6.0))
+            head = float(self.rng.uniform(-0.15, 0.15))
             drone.reset(px, py, head)
 
     def step(self, dt: float, maze: Maze) -> bool:
@@ -482,12 +525,11 @@ class MazePopulation:
 
     def evaluate_fitness(self) -> None:
         for d in self.drones:
-            prog_score = (d.max_progress ** 1.2) * 2500.0
-            dist_score = min(d.distance_traveled * 0.1, 150.0)
-            time_score = d.time_alive_steps * 0.1
-            goal_bonus = 2000.0 if d.reached_goal else 0.0
+            prog_score = (d.max_progress ** 1.3) * 4000.0
+            time_score = min(d.time_alive_steps * 0.08, 40.0)
+            goal_bonus = 4000.0 if d.reached_goal else 0.0
             coll_penalty = 30.0 if (d.collided and not d.reached_goal) else 0.0
-            d.fitness = float(prog_score + dist_score + time_score + goal_bonus - coll_penalty)
+            d.fitness = float(prog_score + time_score + goal_bonus - coll_penalty)
 
     def reproduce(self, maze: Maze) -> None:
         self.evaluate_fitness()
@@ -495,19 +537,38 @@ class MazePopulation:
         pool_size = max(4, int(self.size * 0.20))
         parents = sorted_d[:pool_size]
 
+        best_drone = sorted_d[0]
+        if best_drone.max_progress > self.all_time_best_progress:
+            self.all_time_best_progress = best_drone.max_progress
+            self.all_time_best_controller = best_drone.controller.copy()
+            self.stagnant_count = 0
+        else:
+            self.stagnant_count += 1
+
         next_gen = self.generation + 1
-        sigma = compute_mutation_sigma(next_gen, sigma_0=0.10, decay_factor=0.985, min_sigma=0.015)
+        if self.stagnant_count >= 5:
+            sigma = 0.08
+            mutation_rate = 0.12
+        else:
+            sigma = 0.04
+            mutation_rate = 0.07
 
         new_drones: List[MazeDrone] = []
-        for i in range(min(2, len(sorted_d))):
-            new_d = MazeDrone(x=0.0, y=0.0, heading=0.0, controller=sorted_d[i].controller.copy())
-            new_drones.append(new_d)
+        if self.all_time_best_controller is not None:
+            new_drones.append(MazeDrone(x=0.0, y=0.0, heading=0.0, controller=self.all_time_best_controller.copy()))
+        new_drones.append(MazeDrone(x=0.0, y=0.0, heading=0.0, controller=sorted_d[0].controller.copy()))
+
+        champ_controller = self.all_time_best_controller or sorted_d[0].controller
+        for _ in range(int(self.size * 0.20)):
+            child_net = champ_controller.copy()
+            child_net.mutate(mutation_rate=0.05, sigma=0.03, rng=self.rng)
+            new_drones.append(MazeDrone(x=0.0, y=0.0, heading=0.0, controller=child_net))
 
         while len(new_drones) < self.size:
             pa = self.rng.choice(parents)
             pb = self.rng.choice(parents)
             child_net = BatNeuralNet.uniform_crossover(pa.controller, pb.controller, rng=self.rng)
-            child_net.mutate(mutation_rate=0.10, sigma=sigma, rng=self.rng)
+            child_net.mutate(mutation_rate=mutation_rate, sigma=sigma, rng=self.rng)
             new_drones.append(MazeDrone(x=0.0, y=0.0, heading=0.0, controller=child_net))
 
         self.drones = new_drones
@@ -530,7 +591,7 @@ def run_maze_simulation(
     rows: int = 22,
     cell_size: float = 40.0,
     pop_size: int = 100,
-    max_steps: int = 650,
+    max_steps: int = 2500,
     steps_limit: Optional[int] = None,
     weights_path: Optional[str] = None,
     neural_window: bool = False,
@@ -685,7 +746,7 @@ def run_maze_simulation(
                             d.controller = champ.copy()
                     else:
                         best_curr = pop.get_best_drone()
-                        if best_curr.max_progress > 0.15:
+                        if best_curr.max_progress > 0.20:
                             save_path = "best_weights_maze.npz"
                             try:
                                 pop.save_best(save_path)
@@ -807,7 +868,7 @@ if __name__ == "__main__":
     parser.add_argument("--rows", type=int, default=22, help="Maze rows")
     parser.add_argument("--cell-size", type=float, default=40.0, help="Grid cell size")
     parser.add_argument("--pop-size", type=int, default=100, help="Swarm population size")
-    parser.add_argument("--max-steps", type=int, default=650, help="Max steps per episode")
+    parser.add_argument("--max-steps", type=int, default=2500, help="Max steps per episode")
     parser.add_argument("--weights", type=str, default=None, help="Weights file to load")
     parser.add_argument("--neural-window", action="store_true", help="Launch companion neural visualizer window")
     parser.add_argument("--hud-window", action="store_true", help="Launch companion HUD telemetry window")

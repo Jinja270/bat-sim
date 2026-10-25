@@ -1,0 +1,19 @@
+# Bytecode & Caches
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+
+# Inter-process runtime files
+live_activations.npz*
+*.tmp
+*.tmp.npz
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# OS artifacts
+.DS_Store
+Thumbs.db

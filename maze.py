@@ -43,8 +43,10 @@ class Maze:
         self.height = self.rows * self.cell_size
         self.grid = np.ones((self.rows, self.cols), dtype=np.uint8)
         self.dist_field = np.full((self.rows, self.cols), -1.0, dtype=np.float64)
-        self.max_path_dist = 1.0
-        self.start_pos = (2.0 * self.cell_size, 2.0 * self.cell_size)
+        self.dist_start = np.full((self.rows, self.cols), -1.0, dtype=np.float64)
+        self.start_to_goal_dist = 1.0
+        self.max_corridor_depth = 1.0
+        self.start_pos = (1.5 * self.cell_size, 1.5 * self.cell_size)
         self.goal_pos = ((self.cols - 2.5) * self.cell_size, (self.rows - 2.5) * self.cell_size)
         self.goal_radius = self.cell_size * 1.5
         self.rng = random.Random(seed)
@@ -83,12 +85,14 @@ class Maze:
                             wx, wy = self.rng.choice(walls)
                             self.grid[wy, wx] = 0
 
-        self.grid[1:4, 1:4] = 0
-        self.grid[-4:-1, -4:-1] = 0
+        self.grid[1:3, 1:3] = 0
+        self.grid[-3:-1, -3:-1] = 0
+        self.grid[1, 3] = 0
         self.grid[1, 4] = 0
+        self.grid[3, 1] = 0
         self.grid[4, 1] = 0
 
-        self.start_pos = (2.5 * self.cell_size, 2.5 * self.cell_size)
+        self.start_pos = (1.5 * self.cell_size, 1.5 * self.cell_size)
         self.goal_pos = ((self.cols - 2.5) * self.cell_size, (self.rows - 2.5) * self.cell_size)
 
         self._compute_distance_field()
@@ -113,18 +117,33 @@ class Maze:
                         self.dist_field[ny, nx] = d + 1.0
                         q.append((nx, ny, d + 1.0))
 
+        self.dist_start.fill(-1.0)
         sx = int(self.start_pos[0] / self.cell_size)
         sy = int(self.start_pos[1] / self.cell_size)
-        self.max_path_dist = max(1.0, float(self.dist_field[sy, sx]))
+        qs = deque([(sx, sy, 0.0)])
+        self.dist_start[sy, sx] = 0.0
+
+        while qs:
+            x, y, d = qs.popleft()
+            for dx, dy in [(0, 1), (0, -1), (1, 0), (-1, 0)]:
+                nx, ny = x + dx, y + dy
+                if 0 <= nx < self.cols and 0 <= ny < self.rows:
+                    if self.grid[ny, nx] == 0 and self.dist_start[ny, nx] < 0.0:
+                        self.dist_start[ny, nx] = d + 1.0
+                        qs.append((nx, ny, d + 1.0))
+
+        self.start_to_goal_dist = max(1.0, float(self.dist_field[sy, sx]))
+        self.max_corridor_depth = max(1.0, float(np.max(self.dist_start)))
 
     def get_progress(self, x: float, y: float) -> float:
         gx = int(x / self.cell_size)
         gy = int(y / self.cell_size)
         if 0 <= gx < self.cols and 0 <= gy < self.rows:
-            d = self.dist_field[gy, gx]
-            if d >= 0.0:
-                prog = (self.max_path_dist - d) / self.max_path_dist
-                return max(0.0, min(1.0, prog))
+            dg = self.dist_field[gy, gx]
+            ds = self.dist_start[gy, gx]
+            p_goal = (self.start_to_goal_dist - dg) / self.start_to_goal_dist if dg >= 0.0 else 0.0
+            p_exp = (ds / self.max_corridor_depth) * 0.85 if ds >= 0.0 else 0.0
+            return max(0.0, min(1.0, max(p_goal, p_exp)))
         return 0.0
 
     def check_collision(self, x: float, y: float, radius: float = 6.0) -> bool:
@@ -259,7 +278,7 @@ class MazeDrone:
         self.controller = controller if controller is not None else BatNeuralNet()
         self.radius = 6.0
         self.max_range = 240.0
-        self.turning_rate_scale = 3.8
+        self.turning_rate_scale = 3.6
 
         self.is_alive = True
         self.collided = False
@@ -303,9 +322,9 @@ class MazeDrone:
 
         self.time_alive_steps += 1
 
-        if self.time_alive_steps > 80:
+        if self.time_alive_steps > 90:
             sx, sy = maze.start_pos
-            if math.hypot(self.x - sx, self.y - sy) < maze.cell_size * 1.6:
+            if math.hypot(self.x - sx, self.y - sy) < maze.cell_size * 0.9:
                 self.is_alive = False
                 self.collided = True
                 return
@@ -414,18 +433,41 @@ class MazePopulation:
     def _init_drones(self) -> None:
         self.drones.clear()
         for _ in range(self.size):
-            d = MazeDrone(x=0.0, y=0.0, heading=0.0, controller=BatNeuralNet(rng=self.rng))
+            net = BatNeuralNet(rng=self.rng)
+            net.w1[:] = self.rng.normal(0.0, 0.08, size=net.w1.shape)
+            net.b1[:] = 0.0
+            net.w2[:] = self.rng.normal(0.0, 0.08, size=net.w2.shape)
+            for i in range(32):
+                net.w2[i, i] += 1.0
+            net.b2[:] = 0.0
+            net.w3[:] = self.rng.normal(0.0, 0.08, size=net.w3.shape)
+            net.b3[:] = 0.0
+
+            net.w1[0, 0] += -2.5
+            net.w1[1, 0] += +2.5
+            net.w3[0, 0] += +1.5
+
+            net.w1[2, 1] += -3.0
+            net.b1[1] += +1.2
+            net.w1[0, 1] += -1.5
+            net.w1[1, 1] += +1.5
+            net.w3[1, 0] += +1.8
+
+            flat = net.get_flat_weights()
+            flat += self.rng.normal(0.0, 0.12, size=flat.shape)
+            net.set_flat_weights(flat)
+
+            d = MazeDrone(x=0.0, y=0.0, heading=0.0, controller=net)
             self.drones.append(d)
 
     def reset_at_maze(self, maze: Maze) -> None:
         self.step_count = 0
         sx, sy = maze.start_pos
         for drone in self.drones:
-            jitter_ang = float(self.rng.uniform(0.0, 2.0 * math.pi))
-            jitter_dist = float(self.rng.uniform(0.0, maze.cell_size * 0.7))
-            px = sx + jitter_dist * math.cos(jitter_ang)
-            py = sy + jitter_dist * math.sin(jitter_ang)
-            head = float(self.rng.uniform(-0.2, math.pi * 0.5 + 0.2))
+            px = sx + float(self.rng.uniform(-10.0, 10.0))
+            py = sy + float(self.rng.uniform(-10.0, 10.0))
+            base_head = float(self.rng.choice([0.0, math.pi * 0.5]))
+            head = base_head + float(self.rng.uniform(-0.25, 0.25))
             drone.reset(px, py, head)
 
     def step(self, dt: float, maze: Maze) -> bool:
@@ -440,15 +482,12 @@ class MazePopulation:
 
     def evaluate_fitness(self) -> None:
         for d in self.drones:
-            if d.max_progress < 0.04:
-                d.fitness = 0.0
-            else:
-                prog_score = (d.max_progress ** 1.3) * 3000.0
-                dist_score = min(d.distance_traveled * 0.12, 180.0)
-                time_score = d.time_alive_steps * 0.15
-                goal_bonus = 1500.0 if d.reached_goal else 0.0
-                coll_penalty = 35.0 if (d.collided and not d.reached_goal) else 0.0
-                d.fitness = float(prog_score + dist_score + time_score + goal_bonus - coll_penalty)
+            prog_score = (d.max_progress ** 1.2) * 2500.0
+            dist_score = min(d.distance_traveled * 0.1, 150.0)
+            time_score = d.time_alive_steps * 0.1
+            goal_bonus = 2000.0 if d.reached_goal else 0.0
+            coll_penalty = 30.0 if (d.collided and not d.reached_goal) else 0.0
+            d.fitness = float(prog_score + dist_score + time_score + goal_bonus - coll_penalty)
 
     def reproduce(self, maze: Maze) -> None:
         self.evaluate_fitness()
@@ -457,7 +496,7 @@ class MazePopulation:
         parents = sorted_d[:pool_size]
 
         next_gen = self.generation + 1
-        sigma = compute_mutation_sigma(next_gen, sigma_0=0.12, decay_factor=0.985, min_sigma=0.015)
+        sigma = compute_mutation_sigma(next_gen, sigma_0=0.10, decay_factor=0.985, min_sigma=0.015)
 
         new_drones: List[MazeDrone] = []
         for i in range(min(2, len(sorted_d))):
@@ -525,10 +564,6 @@ def run_maze_simulation(
     resolved_weights = None
     if weights_path and os.path.exists(weights_path):
         resolved_weights = weights_path
-    elif os.path.exists("best_weights_maze.npz"):
-        resolved_weights = "best_weights_maze.npz"
-    elif os.path.exists(os.path.join(os.path.dirname(__file__), "best_weights_maze.npz")):
-        resolved_weights = os.path.join(os.path.dirname(__file__), "best_weights_maze.npz")
 
     champ = None
     if resolved_weights:
@@ -649,12 +684,14 @@ def run_maze_simulation(
                         for d in pop.drones:
                             d.controller = champ.copy()
                     else:
-                        save_path = "best_weights_maze.npz"
-                        try:
-                            pop.save_best(save_path)
-                            champ = pop.load_champion(save_path)
-                        except Exception:
-                            pass
+                        best_curr = pop.get_best_drone()
+                        if best_curr.max_progress > 0.15:
+                            save_path = "best_weights_maze.npz"
+                            try:
+                                pop.save_best(save_path)
+                                champ = pop.load_champion(save_path)
+                            except Exception:
+                                pass
                         pop.reproduce(maze)
                     break
             total_frames += steps_per_frame

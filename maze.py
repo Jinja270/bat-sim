@@ -276,6 +276,8 @@ class MazeDrone:
         self.heading = float(heading)
         self.speed = float(speed)
         self.controller = controller if controller is not None else BatNeuralNet()
+        if hasattr(self.controller, 'reset_state'):
+            self.controller.reset_state()
         self.radius = 6.0
         self.max_range = 240.0
         self.turning_rate_scale = 5.5

@@ -91,12 +91,6 @@ Train a population headlessly at maximum CPU speed:
 python train.py --generations 50 --pop-size 100 --output best_weights.npz
 ```
 
-### Running Test Suite
-Execute the full test suite (87 tests covering physics, kinematics, vectorized batch ray casting, and neuroevolution):
-```bash
-python -m unittest test_simulation.py
-```
-
 ---
 
 ## Architecture Overview
@@ -114,7 +108,6 @@ bat-sim/
 ├── physics.py               # Vectorized ToF ray-casting, Doppler calculations, geometry
 ├── train.py                 # Headless batch training script with progress bar
 ├── best_weights.npz         # Saved pre-trained 98.3% survival champion weights
-├── test_simulation.py       # Full unit and adversarial test suite
 ├── requirements.txt         # Core dependencies (numpy, pygame)
 └── README.md                # Project documentation
 ```

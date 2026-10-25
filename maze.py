@@ -85,6 +85,8 @@ class Maze:
 
         self.grid[1:4, 1:4] = 0
         self.grid[-4:-1, -4:-1] = 0
+        self.grid[1, 4] = 0
+        self.grid[4, 1] = 0
 
         self.start_pos = (2.5 * self.cell_size, 2.5 * self.cell_size)
         self.goal_pos = ((self.cols - 2.5) * self.cell_size, (self.rows - 2.5) * self.cell_size)
@@ -300,6 +302,14 @@ class MazeDrone:
             return
 
         self.time_alive_steps += 1
+
+        if self.time_alive_steps > 80:
+            sx, sy = maze.start_pos
+            if math.hypot(self.x - sx, self.y - sy) < maze.cell_size * 1.6:
+                self.is_alive = False
+                self.collided = True
+                return
+
         self.ping_timer += dt
         ping_period = 1.0 / max(10.0, self.recent_ping_freq)
 
@@ -307,15 +317,15 @@ class MazeDrone:
             self.ping_timer = 0.0
             self.wavefronts.append(0.0)
 
-            ray_offsets = (-math.pi / 5.2, 0.0, math.pi / 5.2)
-            dists = [maze.raycast(self.x, self.y, self.heading + off, self.max_range) for off in ray_offsets]
-            self.last_dists = dists
+            ray_angles = (-math.pi * 0.35, -math.pi * 0.17, 0.0, math.pi * 0.17, math.pi * 0.35)
+            dists = [maze.raycast(self.x, self.y, self.heading + off, self.max_range) for off in ray_angles]
+            self.last_dists = [dists[1], dists[2], dists[3]]
 
-            dL = dists[0] / self.max_range
-            dF = dists[1] / self.max_range
-            dR = dists[2] / self.max_range
+            dL = min(dists[0], dists[1]) / self.max_range
+            dF = dists[2] / self.max_range
+            dR = min(dists[3], dists[4]) / self.max_range
             norm_v = self.speed / 100.0
-            closing_approx = (self.max_range - dists[1]) / self.max_range
+            closing_approx = (self.max_range - dists[2]) / self.max_range
 
             raw_in = np.array([dL, dR, dF, norm_v, closing_approx], dtype=np.float64)
             out = self.controller.forward(raw_in)
@@ -415,7 +425,7 @@ class MazePopulation:
             jitter_dist = float(self.rng.uniform(0.0, maze.cell_size * 0.7))
             px = sx + jitter_dist * math.cos(jitter_ang)
             py = sy + jitter_dist * math.sin(jitter_ang)
-            head = float(self.rng.uniform(-0.3, math.pi * 0.5 + 0.3))
+            head = float(self.rng.uniform(-0.2, math.pi * 0.5 + 0.2))
             drone.reset(px, py, head)
 
     def step(self, dt: float, maze: Maze) -> bool:
@@ -430,12 +440,15 @@ class MazePopulation:
 
     def evaluate_fitness(self) -> None:
         for d in self.drones:
-            prog_score = d.max_progress * 1200.0
-            time_score = d.time_alive_steps * 0.25
-            dist_score = min(d.distance_traveled * 0.08, 120.0)
-            goal_bonus = 600.0 if d.reached_goal else 0.0
-            coll_penalty = 50.0 if (d.collided and not d.reached_goal) else 0.0
-            d.fitness = float(prog_score + time_score + dist_score + goal_bonus - coll_penalty)
+            if d.max_progress < 0.04:
+                d.fitness = 0.0
+            else:
+                prog_score = (d.max_progress ** 1.3) * 3000.0
+                dist_score = min(d.distance_traveled * 0.12, 180.0)
+                time_score = d.time_alive_steps * 0.15
+                goal_bonus = 1500.0 if d.reached_goal else 0.0
+                coll_penalty = 35.0 if (d.collided and not d.reached_goal) else 0.0
+                d.fitness = float(prog_score + dist_score + time_score + goal_bonus - coll_penalty)
 
     def reproduce(self, maze: Maze) -> None:
         self.evaluate_fitness()
@@ -463,7 +476,7 @@ class MazePopulation:
         self.reset_at_maze(maze)
 
     def get_best_drone(self) -> MazeDrone:
-        return max(self.drones, key=lambda d: (d.max_progress, d.fitness))
+        return max(self.drones, key=lambda d: (d.max_progress, d.distance_traveled))
 
     def save_best(self, filepath: str) -> None:
         best = self.get_best_drone()
@@ -516,8 +529,6 @@ def run_maze_simulation(
         resolved_weights = "best_weights_maze.npz"
     elif os.path.exists(os.path.join(os.path.dirname(__file__), "best_weights_maze.npz")):
         resolved_weights = os.path.join(os.path.dirname(__file__), "best_weights_maze.npz")
-    elif os.path.exists(os.path.join(os.path.dirname(__file__), "best_weights.npz")):
-        resolved_weights = os.path.join(os.path.dirname(__file__), "best_weights.npz")
 
     champ = None
     if resolved_weights:

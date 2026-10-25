@@ -79,6 +79,12 @@ pip install -r requirements.txt
 python main.py
 ```
 
+### Launch 3D Overhead Maze Swarm Simulation
+```bash
+python maze.py
+# or: python main.py --maze
+```
+
 ### Launch with Dedicated Neural Window
 ```bash
 python main.py --neural-window
@@ -98,6 +104,7 @@ python train.py --generations 50 --pop-size 100 --output best_weights.npz
 ```
 bat-sim/
 ├── main.py                  # 60 FPS Pygame interactive loop & telemetry HUD
+├── maze.py                  # 3D overhead labyrinth & autonomous green swarm neuroevolution
 ├── neural_window.py         # Dedicated second window for neural architecture visualizer
 ├── neural_ipc.py            # High-speed shared-memory IPC (multiprocessing.shared_memory)
 ├── neural_visualizer.py     # Real-time synaptic mesh, glowing nodes, and particle renderer

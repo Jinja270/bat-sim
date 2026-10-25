@@ -373,8 +373,23 @@ def main() -> None:
     parser.add_argument('--weights', type=str, default='best_weights.npz', help='Weights file to load')
     parser.add_argument('--waves', action='store_true', help='Display radar waves (default: False)')
     parser.add_argument('--neural-window', action='store_true', help='Launch neural network in a separate dedicated window')
+    parser.add_argument('--maze', action='store_true', help='Launch 3D overhead maze swarm simulation')
     parser.add_argument('--seed', type=int, default=None, help='Random seed')
     args = parser.parse_args()
+    if args.maze:
+        try:
+            from bat_sim.maze import run_maze_simulation
+        except ImportError:
+            from maze import run_maze_simulation
+        run_maze_simulation(
+            pop_size=args.pop_size,
+            max_steps=args.max_steps,
+            steps_limit=args.steps,
+            weights_path=args.weights,
+            neural_window=args.neural_window,
+            headless=args.headless,
+        )
+        return
     run_simulation(pop_size=args.pop_size, max_steps=args.max_steps, headless=args.headless, steps_limit=args.steps, generations_limit=args.generations, weights_path=args.weights, comparison=args.comparison, fast_forward=args.fast_forward, waves=args.waves, neural_window=args.neural_window, seed=args.seed)
 if __name__ == '__main__':
     main()

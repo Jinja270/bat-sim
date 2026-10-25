@@ -33,6 +33,7 @@ COLOR_START_ZONE: Tuple[int, int, int] = (35, 160, 85)
 COLOR_GOAL_ZONE: Tuple[int, int, int] = (0, 210, 255)
 COLOR_GOAL_GOLD: Tuple[int, int, int] = (255, 200, 50)
 
+
 class Maze:
     def __init__(self, cols: int = 35, rows: int = 22, cell_size: float = 40.0, seed: Optional[int] = None) -> None:
         self.cols = int(cols)
@@ -481,6 +482,7 @@ def run_maze_simulation(
     steps_limit: Optional[int] = None,
     weights_path: Optional[str] = None,
     neural_window: bool = False,
+    hud_window: bool = False,
     headless: bool = False,
 ) -> None:
     if headless:
@@ -531,17 +533,28 @@ def run_maze_simulation(
     paused = False
     fast_forward = False
     show_waves = False
+    show_hud = not hud_window
     ray_modes = ["best", "all", "none"]
     ray_mode_idx = 0
 
     ipc_writer = ActivationWriter()
     neural_script = os.path.abspath(os.path.join(os.path.dirname(__file__), "neural_window.py"))
+    hud_script = os.path.abspath(os.path.join(os.path.dirname(__file__), "maze_hud_window.py"))
     repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 
-    if neural_window:
+    hud_process = None
+    if hud_window and not headless:
         try:
             import subprocess
-            subprocess.Popen([sys.executable, neural_script], cwd=repo_root)
+            hud_process = subprocess.Popen([sys.executable, hud_script], cwd=repo_root)
+        except Exception:
+            pass
+
+    neural_process = None
+    if neural_window and not headless:
+        try:
+            import subprocess
+            neural_process = subprocess.Popen([sys.executable, neural_script], cwd=repo_root)
         except Exception:
             pass
 
@@ -593,10 +606,19 @@ def run_maze_simulation(
                     show_waves = not show_waves
                 elif event.key == pygame.K_d:
                     ray_mode_idx = (ray_mode_idx + 1) % len(ray_modes)
+                elif event.key == pygame.K_h:
+                    show_hud = not show_hud
+                elif event.key == pygame.K_o:
+                    if hud_process is None or hud_process.poll() is not None:
+                        try:
+                            import subprocess
+                            hud_process = subprocess.Popen([sys.executable, hud_script], cwd=repo_root)
+                        except Exception:
+                            pass
                 elif event.key == pygame.K_p:
                     try:
                         import subprocess
-                        subprocess.Popen([sys.executable, neural_script], cwd=repo_root)
+                        neural_process = subprocess.Popen([sys.executable, neural_script], cwd=repo_root)
                     except Exception:
                         pass
                 elif event.key == pygame.K_UP:
@@ -639,6 +661,26 @@ def run_maze_simulation(
             draw_r = (ray_mode == "all") or (ray_mode == "best" and is_best)
             drone.draw(screen, draw_waves=show_waves, draw_rays=draw_r, is_champ=is_best)
 
+        alive_count = sum(1 for d in pop.drones if d.is_alive)
+        reached_count = sum(1 for d in pop.drones if d.reached_goal)
+        best_prog = best_drone.max_progress * 100.0 if best_drone else 0.0
+        fps = clock.get_fps() if not fast_forward else 1000.0
+
+        telem_data = {
+            "gen": pop.generation,
+            "mode": 1 if demo_mode else 0,
+            "alive": alive_count,
+            "pop_size": pop.size,
+            "reached": reached_count,
+            "progress": best_prog,
+            "step": pop.step_count,
+            "max_steps": pop.max_steps,
+            "paused": 1 if paused else 0,
+            "fast_forward": 1 if fast_forward else 0,
+            "fps": fps,
+            "ray_mode": ray_mode_idx,
+        }
+
         if best_drone is not None and getattr(best_drone, "controller", None) is not None:
             ctrl = best_drone.controller
             if hasattr(ctrl, "get_last_activations"):
@@ -648,53 +690,63 @@ def run_maze_simulation(
                     ping_freq=getattr(best_drone, "recent_ping_freq", 10.0),
                     speed=getattr(best_drone, "speed", 85.0),
                     heading=getattr(best_drone, "heading", 0.0),
+                    telemetry=telem_data,
                 )
 
-        alive_count = sum(1 for d in pop.drones if d.is_alive)
-        reached_count = sum(1 for d in pop.drones if d.reached_goal)
-        best_prog = best_drone.max_progress * 100.0 if best_drone else 0.0
-        fps = clock.get_fps() if not fast_forward else 1000.0
+        if show_hud:
+            card_w, card_h = 360, 210
+            card_x = 15
+            card_y = win_h - card_h - 15
+            hud_surf = pygame.Surface((card_w, card_h), pygame.SRCALPHA)
+            pygame.draw.rect(hud_surf, (15, 20, 30, 230), (0, 0, card_w, card_h), border_radius=8)
+            pygame.draw.rect(hud_surf, (0, 240, 160, 240), (0, 0, card_w, card_h), 1, border_radius=8)
 
-        card_w, card_h = 360, 210
-        hud_surf = pygame.Surface((card_w, card_h), pygame.SRCALPHA)
-        pygame.draw.rect(hud_surf, (15, 20, 30, 230), (0, 0, card_w, card_h), border_radius=8)
-        pygame.draw.rect(hud_surf, (0, 240, 160, 240), (0, 0, card_w, card_h), 1, border_radius=8)
+            t_title = font.render("AUTONOMOUS SWARM MAZE NAVIGATION", True, (0, 240, 160))
+            hud_surf.blit(t_title, (14, 10))
 
-        t_title = font.render("AUTONOMOUS SWARM MAZE NAVIGATION", True, (0, 240, 160))
-        hud_surf.blit(t_title, (14, 10))
+            mode_str = "CHAMPION DEMO [E]" if demo_mode else "EVOLVING SWARM [E]"
+            lines = [
+                f"Generation   : {pop.generation} ({mode_str})",
+                f"Swarm Alive  : {alive_count} / {pop.size} ({alive_count/pop.size*100:.1f}%)",
+                f"Exit Reached : {reached_count} drones",
+                f"Best Progress: {best_prog:.1f}% along maze path",
+                f"Pulse Rate   : {best_drone.recent_ping_freq:.1f} Hz [10-150 Hz]",
+                f"Step / Limit : {pop.step_count} / {pop.max_steps}",
+            ]
 
-        mode_str = "CHAMPION DEMO [E]" if demo_mode else "EVOLVING SWARM [E]"
-        lines = [
-            f"Generation   : {pop.generation} ({mode_str})",
-            f"Swarm Alive  : {alive_count} / {pop.size} ({alive_count/pop.size*100:.1f}%)",
-            f"Exit Reached : {reached_count} drones",
-            f"Best Progress: {best_prog:.1f}% along maze path",
-            f"Pulse Rate   : {best_drone.recent_ping_freq:.1f} Hz [10-150 Hz]",
-            f"Step / Limit : {pop.step_count} / {pop.max_steps}",
-        ]
+            yo = 34
+            for l in lines:
+                txt = small_font.render(l, True, (240, 245, 255))
+                hud_surf.blit(txt, (14, yo))
+                yo += 18
 
-        yo = 34
-        for l in lines:
-            txt = small_font.render(l, True, (240, 245, 255))
-            hud_surf.blit(txt, (14, yo))
-            yo += 18
+            bar_x, bar_y, bar_w, bar_h = 14, yo + 4, card_w - 28, 8
+            pygame.draw.rect(hud_surf, (30, 40, 55), (bar_x, bar_y, bar_w, bar_h), border_radius=3)
+            fill_w = int(bar_w * (best_prog / 100.0))
+            if fill_w > 0:
+                bar_color = (0, 240, 160) if best_prog < 95.0 else (255, 215, 0)
+                pygame.draw.rect(hud_surf, bar_color, (bar_x, bar_y, fill_w, bar_h), border_radius=3)
 
-        bar_x, bar_y, bar_w, bar_h = 14, yo + 4, card_w - 28, 8
-        pygame.draw.rect(hud_surf, (30, 40, 55), (bar_x, bar_y, bar_w, bar_h), border_radius=3)
-        fill_w = int(bar_w * (best_prog / 100.0))
-        if fill_w > 0:
-            bar_color = (0, 240, 160) if best_prog < 95.0 else (255, 215, 0)
-            pygame.draw.rect(hud_surf, bar_color, (bar_x, bar_y, fill_w, bar_h), border_radius=3)
+            status_str = "PAUSED [Space]" if paused else ("FAST-FORWARD [F]" if fast_forward else f"RUNNING ({fps:.0f} FPS)")
+            t_sub = small_font.render(f"{status_str} | Rays: {ray_mode.upper()} [D] | HUD: [H]/[O]", True, (160, 175, 195))
+            hud_surf.blit(t_sub, (14, yo + 18))
 
-        status_str = "PAUSED [Space]" if paused else ("FAST-FORWARD [F]" if fast_forward else f"RUNNING ({fps:.0f} FPS)")
-        t_sub = small_font.render(f"{status_str} | Rays: {ray_mode.upper()} [D] | New: [R]", True, (160, 175, 195))
-        hud_surf.blit(t_sub, (14, yo + 18))
-
-        screen.blit(hud_surf, (15, 15))
+            screen.blit(hud_surf, (card_x, card_y))
 
         pygame.display.flip()
         if not fast_forward:
             clock.tick(60)
+
+    if hud_process is not None:
+        try:
+            hud_process.terminate()
+        except Exception:
+            pass
+    if neural_process is not None:
+        try:
+            neural_process.terminate()
+        except Exception:
+            pass
 
     ipc_writer.close()
     pygame.quit()
@@ -710,6 +762,7 @@ if __name__ == "__main__":
     parser.add_argument("--max-steps", type=int, default=650, help="Max steps per episode")
     parser.add_argument("--weights", type=str, default=None, help="Weights file to load")
     parser.add_argument("--neural-window", action="store_true", help="Launch companion neural visualizer window")
+    parser.add_argument("--hud-window", action="store_true", help="Launch companion HUD telemetry window")
     parser.add_argument("--steps", type=int, default=None, help="Stop after N total frames")
     parser.add_argument("--headless", action="store_true", help="Run with dummy video driver")
     args = parser.parse_args()
@@ -723,5 +776,6 @@ if __name__ == "__main__":
         steps_limit=args.steps,
         weights_path=args.weights,
         neural_window=args.neural_window,
+        hud_window=args.hud_window,
         headless=args.headless,
     )

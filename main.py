@@ -373,6 +373,7 @@ def main() -> None:
     parser.add_argument('--weights', type=str, default='best_weights.npz', help='Weights file to load')
     parser.add_argument('--waves', action='store_true', help='Display radar waves (default: False)')
     parser.add_argument('--neural-window', action='store_true', help='Launch neural network in a separate dedicated window')
+    parser.add_argument('--hud-window', action='store_true', help='Launch companion HUD telemetry window')
     parser.add_argument('--maze', action='store_true', help='Launch 3D overhead maze swarm simulation')
     parser.add_argument('--seed', type=int, default=None, help='Random seed')
     args = parser.parse_args()
@@ -387,6 +388,7 @@ def main() -> None:
             steps_limit=args.steps,
             weights_path=args.weights,
             neural_window=args.neural_window,
+            hud_window=args.hud_window,
             headless=args.headless,
         )
         return

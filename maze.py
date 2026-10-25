@@ -808,6 +808,8 @@ def run_maze_simulation(
                         print(f"[Maze] Error saving: {e}")
                 elif event.key == pygame.K_r:
                     maze.generate()
+                    pop.all_time_best_progress = 0.0
+                    pop.stagnant_count = 0
                     pop.reset_at_maze(maze)
                     if demo_mode and champ is not None:
                         for d in pop.drones:

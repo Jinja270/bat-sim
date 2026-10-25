@@ -116,10 +116,10 @@ class BatNeuralNet:
         z_safe = np.clip(out[..., 1], -60.0, 60.0)
         res[..., 1] = 1.0 / (1.0 + np.exp(-z_safe))
         if x.ndim == 1:
-            self.last_inputs = x.copy()
-            self.last_h1 = h1.copy()
-            self.last_h2 = h2.copy()
-            self.last_outputs = res.copy()
+            self.last_inputs = x
+            self.last_h1 = h1
+            self.last_h2 = h2
+            self.last_outputs = res
         return res
 
     def get_last_activations(self) -> Dict[str, np.ndarray]:

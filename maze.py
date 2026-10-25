@@ -438,7 +438,7 @@ class MazeDrone:
 
 
 class MazePopulation:
-    def __init__(self, size: int = 100, max_steps: int = 2500, seed: Optional[int] = None) -> None:
+    def __init__(self, size: int = 150, max_steps: int = 2500, seed: Optional[int] = None) -> None:
         self.size = int(size)
         self.max_steps = int(max_steps)
         self.step_count = 0
@@ -503,6 +503,24 @@ class MazePopulation:
 
             d = MazeDrone(x=0.0, y=0.0, heading=0.0, controller=net)
             self.drones.append(d)
+        self._sync_vectors()
+
+    def _sync_vectors(self) -> None:
+        self.W1 = np.zeros((self.size, 5, 32), dtype=np.float64)
+        self.B1 = np.zeros((self.size, 1, 32), dtype=np.float64)
+        self.W2 = np.zeros((self.size, 32, 32), dtype=np.float64)
+        self.B2 = np.zeros((self.size, 1, 32), dtype=np.float64)
+        self.W3 = np.zeros((self.size, 32, 2), dtype=np.float64)
+        self.B3 = np.zeros((self.size, 1, 2), dtype=np.float64)
+        self.raw_inputs = np.zeros((self.size, 1, 5), dtype=np.float64)
+        for i, d in enumerate(self.drones):
+            c = d.controller
+            self.W1[i] = c.w1
+            self.B1[i, 0] = c.b1
+            self.W2[i] = c.w2
+            self.B2[i, 0] = c.b2
+            self.W3[i] = c.w3
+            self.B3[i, 0] = c.b3
 
     def reset_at_maze(self, maze: Maze) -> None:
         self.step_count = 0
@@ -515,13 +533,97 @@ class MazePopulation:
 
     def step(self, dt: float, maze: Maze) -> bool:
         self.step_count += 1
-        any_alive = False
-        for d in self.drones:
-            if d.is_alive:
-                d.step(dt, maze)
-                if d.is_alive:
-                    any_alive = True
-        return not any_alive
+        alive_indices = [i for i, d in enumerate(self.drones) if d.is_alive]
+        if not alive_indices:
+            return True
+
+        ping_indices = []
+        inv_max_range = 1.0 / 240.0
+        gx, gy = maze.goal_pos
+        RAY_OFFSETS = (-math.pi * 0.35, -math.pi * 0.17, 0.0, math.pi * 0.17, math.pi * 0.35)
+
+        for i in alive_indices:
+            d = self.drones[i]
+            d.time_alive_steps += 1
+            d.ping_timer += dt
+            period = 1.0 / max(10.0, d.recent_ping_freq)
+            if d.ping_timer >= period:
+                d.ping_timer = 0.0
+                ping_indices.append(i)
+                h = d.heading
+                r0 = maze.raycast(d.x, d.y, h + RAY_OFFSETS[0], 240.0)
+                r1 = maze.raycast(d.x, d.y, h + RAY_OFFSETS[1], 240.0)
+                r2 = maze.raycast(d.x, d.y, h, 240.0)
+                r3 = maze.raycast(d.x, d.y, h + RAY_OFFSETS[3], 240.0)
+                r4 = maze.raycast(d.x, d.y, h + RAY_OFFSETS[4], 240.0)
+                d.last_dists = [r1, r2, r3]
+
+                dL = min(r0, r1) * inv_max_range
+                dF = r2 * inv_max_range
+                dR = min(r3, r4) * inv_max_range
+
+                dx = gx - d.x
+                dy = gy - d.y
+                target_ang = math.atan2(dy, dx)
+                bearing = (target_ang - h + math.pi) % (2.0 * math.pi) - math.pi
+
+                self.raw_inputs[i, 0, 0] = dL
+                self.raw_inputs[i, 0, 1] = dR
+                self.raw_inputs[i, 0, 2] = dF
+                self.raw_inputs[i, 0, 3] = bearing / math.pi
+                self.raw_inputs[i, 0, 4] = d.speed * 0.01
+
+        if ping_indices:
+            p_idx = np.array(ping_indices, dtype=np.int32)
+            X = self.raw_inputs[p_idx]
+            h1 = np.maximum(0.0, np.matmul(X, self.W1[p_idx]) + self.B1[p_idx])
+            h2 = np.maximum(0.0, np.matmul(h1, self.W2[p_idx]) + self.B2[p_idx])
+            out = np.matmul(h2, self.W3[p_idx]) + self.B3[p_idx]
+            dthetas = np.tanh(out[:, 0, 0])
+            urgs = 1.0 / (1.0 + np.exp(-np.clip(out[:, 0, 1], -60.0, 60.0)))
+            for k, i in enumerate(ping_indices):
+                d = self.drones[i]
+                d.delta_theta = float(dthetas[k])
+                d.urgency = float(urgs[k])
+                d.recent_ping_freq = 10.0 + 140.0 * d.urgency
+
+        g_rad2 = maze.goal_radius * maze.goal_radius
+        for i in alive_indices:
+            d = self.drones[i]
+            dF_val = d.last_dists[1] * inv_max_range if d.last_dists else 1.0
+            eff_speed = d.speed * (0.35 + 0.65 * min(1.0, dF_val * 2.5))
+            d.heading = (d.heading + d.delta_theta * d.turning_rate_scale * dt) % (2.0 * math.pi)
+            step_dist = eff_speed * dt
+            d.x += step_dist * math.cos(d.heading)
+            d.y += step_dist * math.sin(d.heading)
+            d.distance_traveled += step_dist
+
+            prog = maze.get_progress(d.x, d.y)
+            if prog > d.max_progress:
+                d.max_progress = prog
+
+            if d.max_progress > d.last_progress_check + 0.005:
+                d.last_progress_check = d.max_progress
+                d.stagnant_steps = 0
+            else:
+                d.stagnant_steps += 1
+                if d.stagnant_steps > 180:
+                    d.is_alive = False
+                    d.collided = True
+                    continue
+
+            gdx = d.x - gx
+            gdy = d.y - gy
+            if (gdx * gdx + gdy * gdy) <= g_rad2:
+                d.reached_goal = True
+                d.is_alive = False
+                continue
+
+            if maze.check_collision(d.x, d.y, d.radius):
+                d.is_alive = False
+                d.collided = True
+
+        return not any(self.drones[i].is_alive for i in alive_indices)
 
     def evaluate_fitness(self) -> None:
         for d in self.drones:
@@ -573,6 +675,7 @@ class MazePopulation:
 
         self.drones = new_drones
         self.generation = next_gen
+        self._sync_vectors()
         self.reset_at_maze(maze)
 
     def get_best_drone(self) -> MazeDrone:
@@ -590,7 +693,7 @@ def run_maze_simulation(
     cols: int = 35,
     rows: int = 22,
     cell_size: float = 40.0,
-    pop_size: int = 100,
+    pop_size: int = 150,
     max_steps: int = 2500,
     steps_limit: Optional[int] = None,
     weights_path: Optional[str] = None,
@@ -736,7 +839,7 @@ def run_maze_simulation(
                         d.speed = max(40.0, d.speed - 15.0)
 
         if not paused:
-            steps_per_frame = 20 if fast_forward else 1
+            steps_per_frame = 10 if fast_forward else 1
             for _ in range(steps_per_frame):
                 done = pop.step(dt, maze)
                 if done:
@@ -765,10 +868,19 @@ def run_maze_simulation(
         best_drone = pop.get_best_drone()
         ray_mode = ray_modes[ray_mode_idx]
 
-        for drone in pop.drones:
-            is_best = (drone is best_drone)
-            draw_r = (ray_mode == "all") or (ray_mode == "best" and is_best)
-            drone.draw(screen, draw_waves=show_waves, draw_rays=draw_r, is_champ=is_best)
+        if fast_forward:
+            for drone in pop.drones:
+                if drone.is_alive:
+                    if drone is best_drone:
+                        drone.draw(screen, draw_waves=False, draw_rays=True, is_champ=True)
+                    else:
+                        ix, iy = int(round(drone.x)), int(round(drone.y))
+                        pygame.draw.circle(screen, COLOR_SWARM_GREEN, (ix, iy), int(drone.radius))
+        else:
+            for drone in pop.drones:
+                is_best = (drone is best_drone)
+                draw_r = (ray_mode == "all") or (ray_mode == "best" and is_best)
+                drone.draw(screen, draw_waves=show_waves, draw_rays=draw_r, is_champ=is_best)
 
         alive_count = sum(1 for d in pop.drones if d.is_alive)
         reached_count = sum(1 for d in pop.drones if d.reached_goal)
@@ -843,8 +955,7 @@ def run_maze_simulation(
             screen.blit(hud_surf, (card_x, card_y))
 
         pygame.display.flip()
-        if not fast_forward:
-            clock.tick(60)
+        clock.tick(60)
 
     if hud_process is not None:
         try:
@@ -867,7 +978,7 @@ if __name__ == "__main__":
     parser.add_argument("--cols", type=int, default=35, help="Maze columns")
     parser.add_argument("--rows", type=int, default=22, help="Maze rows")
     parser.add_argument("--cell-size", type=float, default=40.0, help="Grid cell size")
-    parser.add_argument("--pop-size", type=int, default=100, help="Swarm population size")
+    parser.add_argument("--pop-size", type=int, default=150, help="Swarm population size")
     parser.add_argument("--max-steps", type=int, default=2500, help="Max steps per episode")
     parser.add_argument("--weights", type=str, default=None, help="Weights file to load")
     parser.add_argument("--neural-window", action="store_true", help="Launch companion neural visualizer window")

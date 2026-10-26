@@ -139,6 +139,11 @@ class BatNeuralNet:
         self.w1[7, 5] -= 3.5
         self.w3[5, 0] -= 1.2
 
+    def init_scratch(self, rng: Optional[np.random.Generator] = None) -> None:
+        r = rng if rng is not None else self._rng
+        self._weights[:] = r.normal(0.0, 0.08, size=self.TOTAL_WEIGHTS)
+        self.reset_state()
+
     def forward(self, inputs: Union[np.ndarray, Sequence[float]]) -> np.ndarray:
         x_in = np.asarray(inputs, dtype=np.float64)
         if x_in.ndim == 1:

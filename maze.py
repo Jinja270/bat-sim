@@ -38,10 +38,11 @@ DRONE_SPRITES_INITIALIZED: bool = False
 SPRITE_SWARM_ROT: List[pygame.Surface] = []
 SPRITE_CHAMP_ROT: List[pygame.Surface] = []
 SPRITE_DEAD_ROT: List[pygame.Surface] = []
+SHADOW_SURF: Optional[pygame.Surface] = None
 
 
 def init_drone_sprites() -> None:
-    global DRONE_SPRITES_INITIALIZED, SPRITE_SWARM_ROT, SPRITE_CHAMP_ROT, SPRITE_DEAD_ROT
+    global DRONE_SPRITES_INITIALIZED, SPRITE_SWARM_ROT, SPRITE_CHAMP_ROT, SPRITE_DEAD_ROT, SHADOW_SURF
     if DRONE_SPRITES_INITIALIZED:
         return
     try:
@@ -63,7 +64,7 @@ def init_drone_sprites() -> None:
         s_champ = pygame.image.load(champ_p)
         s_dead = pygame.image.load(dead_p)
 
-        target_size = (18, 18)
+        target_size = (13, 13)
         s_swarm = pygame.transform.smoothscale(s_swarm, target_size)
         s_champ = pygame.transform.smoothscale(s_champ, target_size)
         s_dead = pygame.transform.smoothscale(s_dead, target_size)
@@ -76,6 +77,9 @@ def init_drone_sprites() -> None:
             SPRITE_SWARM_ROT.append(pygame.transform.rotate(s_swarm, -deg))
             SPRITE_CHAMP_ROT.append(pygame.transform.rotate(s_champ, -deg))
             SPRITE_DEAD_ROT.append(pygame.transform.rotate(s_dead, -deg))
+
+        SHADOW_SURF = pygame.Surface((15, 9), pygame.SRCALPHA)
+        pygame.draw.ellipse(SHADOW_SURF, (0, 0, 0, 90), (0, 0, 15, 9))
 
         DRONE_SPRITES_INITIALIZED = True
     except Exception:
@@ -496,14 +500,19 @@ class MazeDrone:
     def draw(self, surface: pygame.Surface, draw_waves: bool = False, draw_rays: bool = False, is_champ: bool = False) -> None:
         ix, iy = int(round(self.x)), int(round(self.y))
 
-        # 1. Subtle motion trail
-        if self.is_alive and len(self.trail) > 1:
-            t_col = (255, 215, 60) if is_champ else (0, 240, 255)
+        # 1. 3D Hovering Drop Shadow (ground depth separation)
+        if not DRONE_SPRITES_INITIALIZED:
+            init_drone_sprites()
+
+        if self.is_alive and SHADOW_SURF is not None:
+            surface.blit(SHADOW_SURF, (ix - 7 + 2, iy - 4 + 4))
+
+        # 2. Leader-Only Precision Motion Spark (no swarm trail smudging)
+        if is_champ and self.is_alive and len(self.trail) > 1:
             pts = list(self.trail)
             for k, (tx, ty) in enumerate(pts[:-1]):
                 dot_r = 1 if k < 2 else 2
-                dim_col = (t_col[0] // 2, t_col[1] // 2, t_col[2] // 2)
-                pygame.draw.circle(surface, dim_col, (int(round(tx)), int(round(ty))), dot_r)
+                pygame.draw.circle(surface, (255, 200, 50), (int(round(tx)), int(round(ty))), dot_r)
 
         # 2. Sonar Wavefronts
         if draw_waves and self.is_alive:
@@ -556,9 +565,10 @@ class MazeDrone:
 
 
 class MazePopulation:
-    def __init__(self, size: int = 150, max_steps: int = 2500, seed: Optional[int] = None) -> None:
+    def __init__(self, size: int = 80, max_steps: int = 2500, seed: Optional[int] = None, scratch: bool = True) -> None:
         self.size = int(size)
         self.max_steps = int(max_steps)
+        self.scratch = bool(scratch)
         self.step_count = 0
         self.generation = 0
         self.stagnant_count = 0
@@ -572,11 +582,14 @@ class MazePopulation:
         self.drones.clear()
         for i in range(self.size):
             net = BatNeuralNet(rng=self.rng)
-            flat = net.get_flat_weights()
-            flat += self.rng.normal(0.0, 0.05, size=flat.shape)
-            net.set_flat_weights(flat)
+            if self.scratch:
+                net.init_scratch(rng=self.rng)
+            else:
+                flat = net.get_flat_weights()
+                flat += self.rng.normal(0.0, 0.05, size=flat.shape)
+                net.set_flat_weights(flat)
             cb = float(self.rng.uniform(-0.16, 0.16))
-            sm = float(self.rng.uniform(0.88, 1.12))
+            sm = float(self.rng.uniform(0.75, 1.25))
             d = MazeDrone(x=0.0, y=0.0, heading=0.0, controller=net, drone_id=i, corridor_bias=cb, speed_multiplier=sm)
             self.drones.append(d)
         self._sync_vectors()
@@ -608,9 +621,15 @@ class MazePopulation:
         self.step_count = 0
         self.H_states.fill(0.0)
         sx, sy = maze.start_pos
-        for drone in self.drones:
-            px = sx + float(self.rng.uniform(-14.0, 14.0))
-            py = sy + float(self.rng.uniform(-14.0, 14.0))
+        cols = 8
+        spacing = 5.5
+        for i, drone in enumerate(self.drones):
+            r = i // cols
+            c = i % cols
+            ox = (c - cols / 2.0 + 0.5) * spacing + float(self.rng.uniform(-1.5, 1.5))
+            oy = (r - (len(self.drones) / cols) / 2.0 + 0.5) * spacing + float(self.rng.uniform(-1.5, 1.5))
+            px = sx + float(np.clip(ox, -24.0, 24.0))
+            py = sy + float(np.clip(oy, -24.0, 24.0))
             head = float(self.rng.uniform(-0.15, 0.15))
             drone.reset(px, py, head)
 
@@ -692,6 +711,27 @@ class MazePopulation:
                 d.controller.last_h2 = h2[k, 0].copy()
                 d.controller.last_outputs = np.array([dthetas[k], urgs[k], throttles[k]], dtype=np.float64)
 
+        # 1. Anti-tailgating following-distance brake (wake turbulence avoidance)
+        if len(alive_indices) > 1:
+            alive_xs = np.array([self.drones[i].x for i in alive_indices], dtype=np.float64)
+            alive_ys = np.array([self.drones[i].y for i in alive_indices], dtype=np.float64)
+            heads = np.array([self.drones[i].heading for i in alive_indices], dtype=np.float64)
+
+            dx_fwd = alive_xs[None, :] - alive_xs[:, None]
+            dy_fwd = alive_ys[None, :] - alive_ys[:, None]
+            d2_fwd = dx_fwd * dx_fwd + dy_fwd * dy_fwd
+            np.fill_diagonal(d2_fwd, 1e9)
+
+            cos_h = np.cos(heads)[:, None]
+            sin_h = np.sin(heads)[:, None]
+            forward_proj = dx_fwd * cos_h + dy_fwd * sin_h
+
+            is_ahead = (forward_proj > 4.0) & (forward_proj < 24.0) & (d2_fwd < 24.0 * 24.0)
+            has_lead = np.any(is_ahead, axis=1)
+            for k, i in enumerate(alive_indices):
+                if has_lead[k]:
+                    self.drones[i].speed *= 0.88
+
         g_rad2 = maze.goal_radius * maze.goal_radius
         for i in alive_indices:
             d = self.drones[i]
@@ -728,6 +768,32 @@ class MazePopulation:
             if maze.check_collision(d.x, d.y, d.radius):
                 d.is_alive = False
                 d.collided = True
+
+        # 2. Flocking mutual separation (anti-crowding soft repulsion)
+        alive_after = [i for i in alive_indices if self.drones[i].is_alive]
+        if len(alive_after) > 1:
+            alive_xs = np.array([self.drones[i].x for i in alive_after], dtype=np.float64)
+            alive_ys = np.array([self.drones[i].y for i in alive_after], dtype=np.float64)
+            dx = alive_xs[:, None] - alive_xs[None, :]
+            dy = alive_ys[:, None] - alive_ys[None, :]
+            d2 = dx * dx + dy * dy
+            np.fill_diagonal(d2, 1e9)
+
+            sep_r = 16.0
+            mask = d2 < (sep_r * sep_r)
+            if np.any(mask):
+                dists = np.sqrt(np.maximum(d2, 1e-4))
+                overlap = (sep_r - dists) * mask
+                inv_d = 1.0 / dists
+                fx = np.sum((dx * inv_d) * overlap, axis=1) * 0.35
+                fy = np.sum((dy * inv_d) * overlap, axis=1) * 0.35
+                for k, i in enumerate(alive_after):
+                    d = self.drones[i]
+                    nx = d.x + float(fx[k])
+                    ny = d.y + float(fy[k])
+                    if not maze.check_collision(nx, ny, d.radius):
+                        d.x = nx
+                        d.y = ny
 
         return not any(self.drones[i].is_alive for i in alive_indices)
 
@@ -771,7 +837,7 @@ class MazePopulation:
             child_net = champ_controller.copy()
             child_net.mutate(mutation_rate=0.05, sigma=0.03, rng=self.rng)
             cb = float(self.rng.uniform(-0.16, 0.16))
-            sm = float(self.rng.uniform(0.92, 1.08))
+            sm = float(self.rng.uniform(0.85, 1.15))
             new_drones.append(MazeDrone(x=0.0, y=0.0, heading=0.0, controller=child_net, drone_id=len(new_drones), corridor_bias=cb, speed_multiplier=sm))
 
         while len(new_drones) < self.size:
@@ -780,7 +846,7 @@ class MazePopulation:
             child_net = BatNeuralNet.uniform_crossover(pa.controller, pb.controller, rng=self.rng)
             child_net.mutate(mutation_rate=mutation_rate, sigma=sigma, rng=self.rng)
             cb = float(self.rng.uniform(-0.16, 0.16))
-            sm = float(self.rng.uniform(0.88, 1.12))
+            sm = float(self.rng.uniform(0.75, 1.25))
             new_drones.append(MazeDrone(x=0.0, y=0.0, heading=0.0, controller=child_net, drone_id=len(new_drones), corridor_bias=cb, speed_multiplier=sm))
 
         self.drones = new_drones
@@ -803,10 +869,11 @@ def run_maze_simulation(
     cols: int = 35,
     rows: int = 22,
     cell_size: float = 40.0,
-    pop_size: int = 150,
+    pop_size: int = 80,
     max_steps: int = 2500,
     steps_limit: Optional[int] = None,
     weights_path: Optional[str] = None,
+    scratch: bool = True,
     neural_window: bool = False,
     hud_window: bool = False,
     headless: bool = False,
@@ -834,7 +901,7 @@ def run_maze_simulation(
     small_font = pygame.font.SysFont("consolas", 12)
 
     maze = Maze(cols=cols, rows=rows, cell_size=cell_size)
-    pop = MazePopulation(size=pop_size, max_steps=max_steps)
+    pop = MazePopulation(size=pop_size, max_steps=max_steps, scratch=scratch)
     pop.reset_at_maze(maze)
 
     resolved_weights = None
@@ -1036,7 +1103,7 @@ def run_maze_simulation(
             t_title = font.render("AUTONOMOUS SWARM MAZE NAVIGATION", True, (0, 240, 160))
             hud_surf.blit(t_title, (14, 10))
 
-            mode_str = "CHAMPION DEMO [E]" if demo_mode else "EVOLVING SWARM [E]"
+            mode_str = "CHAMPION DEMO [E]" if demo_mode else ("TRAINING FROM SCRATCH [E]" if getattr(pop, "scratch", False) else "EVOLVING SWARM [E]")
             lines = [
                 f"Generation   : {pop.generation} ({mode_str})",
                 f"Swarm Alive  : {alive_count} / {pop.size} ({alive_count/pop.size*100:.1f}%)",
@@ -1089,9 +1156,10 @@ if __name__ == "__main__":
     parser.add_argument("--cols", type=int, default=35, help="Maze columns")
     parser.add_argument("--rows", type=int, default=22, help="Maze rows")
     parser.add_argument("--cell-size", type=float, default=40.0, help="Grid cell size")
-    parser.add_argument("--pop-size", type=int, default=150, help="Swarm population size")
+    parser.add_argument("--pop-size", type=int, default=80, help="Swarm population size (default: 80)")
     parser.add_argument("--max-steps", type=int, default=2500, help="Max steps per episode")
     parser.add_argument("--weights", type=str, default=None, help="Weights file to load")
+    parser.add_argument("--preset", action="store_true", help="Start with hand-crafted biological reflexes instead of scratch")
     parser.add_argument("--neural-window", action="store_true", help="Launch companion neural visualizer window")
     parser.add_argument("--hud-window", action="store_true", help="Launch companion HUD telemetry window")
     parser.add_argument("--steps", type=int, default=None, help="Stop after N total frames")
@@ -1106,6 +1174,7 @@ if __name__ == "__main__":
         max_steps=args.max_steps,
         steps_limit=args.steps,
         weights_path=args.weights,
+        scratch=(not args.preset),
         neural_window=args.neural_window,
         hud_window=args.hud_window,
         headless=args.headless,

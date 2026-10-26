@@ -33,6 +33,54 @@ COLOR_START_ZONE: Tuple[int, int, int] = (35, 160, 85)
 COLOR_GOAL_ZONE: Tuple[int, int, int] = (0, 210, 255)
 COLOR_GOAL_GOLD: Tuple[int, int, int] = (255, 200, 50)
 
+# Pre-rotated Micro-Drone Sprite Caches (360 discrete headings for 0-overhead blitting)
+DRONE_SPRITES_INITIALIZED: bool = False
+SPRITE_SWARM_ROT: List[pygame.Surface] = []
+SPRITE_CHAMP_ROT: List[pygame.Surface] = []
+SPRITE_DEAD_ROT: List[pygame.Surface] = []
+
+
+def init_drone_sprites() -> None:
+    global DRONE_SPRITES_INITIALIZED, SPRITE_SWARM_ROT, SPRITE_CHAMP_ROT, SPRITE_DEAD_ROT
+    if DRONE_SPRITES_INITIALIZED:
+        return
+    try:
+        base_dir = os.path.abspath(os.path.dirname(__file__))
+        assets_dir = os.path.join(base_dir, "assets")
+
+        swarm_p = os.path.join(assets_dir, "drone_swarm.png")
+        champ_p = os.path.join(assets_dir, "drone_champ.png")
+        dead_p = os.path.join(assets_dir, "drone_dead.png")
+
+        if not os.path.exists(swarm_p):
+            swarm_p = os.path.join(assets_dir, "drone_swarm.svg")
+        if not os.path.exists(champ_p):
+            champ_p = os.path.join(assets_dir, "drone_champ.svg")
+        if not os.path.exists(dead_p):
+            dead_p = os.path.join(assets_dir, "drone_dead.svg")
+
+        s_swarm = pygame.image.load(swarm_p)
+        s_champ = pygame.image.load(champ_p)
+        s_dead = pygame.image.load(dead_p)
+
+        target_size = (18, 18)
+        s_swarm = pygame.transform.smoothscale(s_swarm, target_size)
+        s_champ = pygame.transform.smoothscale(s_champ, target_size)
+        s_dead = pygame.transform.smoothscale(s_dead, target_size)
+
+        SPRITE_SWARM_ROT.clear()
+        SPRITE_CHAMP_ROT.clear()
+        SPRITE_DEAD_ROT.clear()
+
+        for deg in range(360):
+            SPRITE_SWARM_ROT.append(pygame.transform.rotate(s_swarm, -deg))
+            SPRITE_CHAMP_ROT.append(pygame.transform.rotate(s_champ, -deg))
+            SPRITE_DEAD_ROT.append(pygame.transform.rotate(s_dead, -deg))
+
+        DRONE_SPRITES_INITIALIZED = True
+    except Exception:
+        DRONE_SPRITES_INITIALIZED = False
+
 
 class Maze:
     def __init__(self, cols: int = 35, rows: int = 22, cell_size: float = 40.0, seed: Optional[int] = None) -> None:
@@ -294,17 +342,31 @@ class Maze:
 
 
 class MazeDrone:
-    def __init__(self, x: float, y: float, heading: float, controller: Optional[BatNeuralNet] = None, speed: float = 85.0) -> None:
+    def __init__(
+        self,
+        x: float,
+        y: float,
+        heading: float,
+        controller: Optional[BatNeuralNet] = None,
+        speed: float = 85.0,
+        drone_id: int = 0,
+        corridor_bias: float = 0.0,
+        speed_multiplier: float = 1.0,
+    ) -> None:
         self.x = float(x)
         self.y = float(y)
         self.heading = float(heading)
         self.speed = float(speed)
+        self.drone_id = int(drone_id)
+        self.corridor_bias = float(corridor_bias)
+        self.speed_multiplier = float(speed_multiplier)
         self.controller = controller if controller is not None else BatNeuralNet()
         if hasattr(self.controller, 'reset_state'):
             self.controller.reset_state()
         self.radius = 6.0
         self.max_range = 240.0
         self.turning_rate_scale = 5.5
+        self.trail: deque[Tuple[float, float]] = deque(maxlen=4)
 
         self.is_alive = True
         self.collided = False
@@ -346,6 +408,7 @@ class MazeDrone:
         self.delta_theta = 0.0
         self.last_dists = [self.max_range] * 7
         self.wavefronts.clear()
+        self.trail.clear()
         if hasattr(self.controller, 'reset_state'):
             self.controller.reset_state()
 
@@ -377,7 +440,7 @@ class MazeDrone:
             raw_in = np.array(r_norm + [norm_bearing, norm_v], dtype=np.float64)
             out = self.controller.forward(raw_in)
 
-            target_steer = float(out[0])
+            target_steer = float(out[0]) + self.corridor_bias * 0.12
             self.delta_theta = 0.55 * self.delta_theta + 0.45 * target_steer
             self.urgency = float(out[1])
             throttle = float(out[2]) if len(out) > 2 else 0.5
@@ -386,7 +449,7 @@ class MazeDrone:
             r4_val = dists[4] * inv_max
             fwd_dist = min(r3_val, r2_val * 1.15, r4_val * 1.15)
             brake = 0.30 + 0.70 * min(1.0, fwd_dist * 2.2)
-            self.speed = (20.0 + 65.0 * throttle) * brake
+            self.speed = (20.0 + 65.0 * throttle) * brake * self.speed_multiplier
             self.recent_ping_freq = 10.0 + 140.0 * self.urgency
 
         self.heading = (self.heading + self.delta_theta * self.turning_rate_scale * dt) % (2.0 * math.pi)
@@ -394,6 +457,9 @@ class MazeDrone:
         self.x += step_dist * math.cos(self.heading)
         self.y += step_dist * math.sin(self.heading)
         self.distance_traveled += step_dist
+
+        if self.time_alive_steps % 3 == 0:
+            self.trail.append((self.x, self.y))
 
         prog = maze.get_progress(self.x, self.y)
         if prog > self.max_progress:
@@ -430,6 +496,16 @@ class MazeDrone:
     def draw(self, surface: pygame.Surface, draw_waves: bool = False, draw_rays: bool = False, is_champ: bool = False) -> None:
         ix, iy = int(round(self.x)), int(round(self.y))
 
+        # 1. Subtle motion trail
+        if self.is_alive and len(self.trail) > 1:
+            t_col = (255, 215, 60) if is_champ else (0, 240, 255)
+            pts = list(self.trail)
+            for k, (tx, ty) in enumerate(pts[:-1]):
+                dot_r = 1 if k < 2 else 2
+                dim_col = (t_col[0] // 2, t_col[1] // 2, t_col[2] // 2)
+                pygame.draw.circle(surface, dim_col, (int(round(tx)), int(round(ty))), dot_r)
+
+        # 2. Sonar Wavefronts
         if draw_waves and self.is_alive:
             for w in self.wavefronts:
                 alpha = max(0, int(130 * (1.0 - w / self.max_range)))
@@ -438,32 +514,45 @@ class MazeDrone:
                                    (int(w + 2), int(w + 2)), int(w), 1)
                 surface.blit(wave_surf, (ix - int(w + 2), iy - int(w + 2)))
 
+        # 3. Sonar Echolocation Rays
         if draw_rays and self.is_alive:
             ray_offsets = (-math.pi * 0.50, -math.pi * 0.33, -math.pi * 0.17, 0.0, math.pi * 0.17, math.pi * 0.33, math.pi * 0.50)
             for d, off in zip(self.last_dists, ray_offsets):
                 ang = self.heading + off
                 ex = self.x + d * math.cos(ang)
                 ey = self.y + d * math.sin(ang)
-                r_col = COLOR_RAY_GREEN if d >= self.max_range * 0.4 else (255, 160, 40)
+                r_col = (255, 210, 50) if is_champ else (COLOR_RAY_GREEN if d >= self.max_range * 0.4 else (255, 160, 40))
                 width = 2 if is_champ else 1
                 pygame.draw.line(surface, r_col, (ix, iy), (int(ex), int(ey)), width)
                 if d < self.max_range:
                     pygame.draw.circle(surface, COLOR_RAY_HIT, (int(ex), int(ey)), 2)
 
+        # 4. Rotated Quadcopter Micro-Drone Sprite
+        if not DRONE_SPRITES_INITIALIZED:
+            init_drone_sprites()
+
+        angle_deg = int(round(-math.degrees(self.heading))) % 360
+
         if self.is_alive:
-            r = int(self.radius)
+            if DRONE_SPRITES_INITIALIZED and SPRITE_SWARM_ROT:
+                spr = SPRITE_CHAMP_ROT[angle_deg] if is_champ else SPRITE_SWARM_ROT[angle_deg]
+                rect = spr.get_rect(center=(ix, iy))
+                surface.blit(spr, rect)
+            else:
+                r = int(self.radius)
+                pygame.draw.circle(surface, COLOR_SWARM_GREEN, (ix, iy), r)
+                pygame.draw.circle(surface, COLOR_SWARM_CORE, (ix, iy), max(2, r - 3))
+
             if is_champ:
-                pygame.draw.circle(surface, (255, 255, 255), (ix, iy), r + 4, 1)
-
-            pygame.draw.circle(surface, COLOR_SWARM_GREEN, (ix, iy), r)
-            pygame.draw.circle(surface, COLOR_SWARM_CORE, (ix, iy), max(2, r - 3))
-
-            nx = ix + int(round((r + 4) * math.cos(self.heading)))
-            ny = iy + int(round((r + 4) * math.sin(self.heading)))
-            pygame.draw.line(surface, (255, 255, 255), (ix, iy), (nx, ny), 2)
+                pygame.draw.circle(surface, (255, 215, 0), (ix, iy), 12, 1)
         else:
             if self.collided:
-                pygame.draw.circle(surface, COLOR_SWARM_DEAD, (ix, iy), int(self.radius - 2))
+                if DRONE_SPRITES_INITIALIZED and SPRITE_DEAD_ROT:
+                    spr = SPRITE_DEAD_ROT[angle_deg]
+                    rect = spr.get_rect(center=(ix, iy))
+                    surface.blit(spr, rect)
+                else:
+                    pygame.draw.circle(surface, COLOR_SWARM_DEAD, (ix, iy), int(self.radius - 2))
 
 
 class MazePopulation:
@@ -481,12 +570,14 @@ class MazePopulation:
 
     def _init_drones(self) -> None:
         self.drones.clear()
-        for _ in range(self.size):
+        for i in range(self.size):
             net = BatNeuralNet(rng=self.rng)
             flat = net.get_flat_weights()
             flat += self.rng.normal(0.0, 0.05, size=flat.shape)
             net.set_flat_weights(flat)
-            d = MazeDrone(x=0.0, y=0.0, heading=0.0, controller=net)
+            cb = float(self.rng.uniform(-0.16, 0.16))
+            sm = float(self.rng.uniform(0.88, 1.12))
+            d = MazeDrone(x=0.0, y=0.0, heading=0.0, controller=net, drone_id=i, corridor_bias=cb, speed_multiplier=sm)
             self.drones.append(d)
         self._sync_vectors()
 
@@ -518,8 +609,8 @@ class MazePopulation:
         self.H_states.fill(0.0)
         sx, sy = maze.start_pos
         for drone in self.drones:
-            px = sx + float(self.rng.uniform(-6.0, 6.0))
-            py = sy + float(self.rng.uniform(-6.0, 6.0))
+            px = sx + float(self.rng.uniform(-14.0, 14.0))
+            py = sy + float(self.rng.uniform(-14.0, 14.0))
             head = float(self.rng.uniform(-0.15, 0.15))
             drone.reset(px, py, head)
 
@@ -585,7 +676,7 @@ class MazePopulation:
 
             for k, i in enumerate(ping_indices):
                 d = self.drones[i]
-                target_steer = float(dthetas[k])
+                target_steer = float(dthetas[k]) + d.corridor_bias * 0.12
                 d.delta_theta = 0.55 * d.delta_theta + 0.45 * target_steer
                 d.urgency = float(urgs[k])
                 d.recent_ping_freq = 10.0 + 140.0 * d.urgency
@@ -594,7 +685,7 @@ class MazePopulation:
                 r4_val = self.raw_inputs[i, 0, 4]
                 fwd_dist = min(r3_val, r2_val * 1.15, r4_val * 1.15)
                 brake = 0.30 + 0.70 * min(1.0, fwd_dist * 2.2)
-                d.speed = (20.0 + 65.0 * float(throttles[k])) * brake
+                d.speed = (20.0 + 65.0 * float(throttles[k])) * brake * d.speed_multiplier
                 d.controller.h_state = h1[k, 0].copy()
                 d.controller.last_inputs = X[k, 0].copy()
                 d.controller.last_h1 = h1[k, 0].copy()
@@ -609,6 +700,9 @@ class MazePopulation:
             d.x += step_dist * math.cos(d.heading)
             d.y += step_dist * math.sin(d.heading)
             d.distance_traveled += step_dist
+
+            if d.time_alive_steps % 3 == 0:
+                d.trail.append((d.x, d.y))
 
             prog = maze.get_progress(d.x, d.y)
             if prog > d.max_progress:
@@ -669,21 +763,25 @@ class MazePopulation:
 
         new_drones: List[MazeDrone] = []
         if self.all_time_best_controller is not None:
-            new_drones.append(MazeDrone(x=0.0, y=0.0, heading=0.0, controller=self.all_time_best_controller.copy()))
-        new_drones.append(MazeDrone(x=0.0, y=0.0, heading=0.0, controller=sorted_d[0].controller.copy()))
+            new_drones.append(MazeDrone(x=0.0, y=0.0, heading=0.0, controller=self.all_time_best_controller.copy(), drone_id=0, corridor_bias=0.0, speed_multiplier=1.0))
+        new_drones.append(MazeDrone(x=0.0, y=0.0, heading=0.0, controller=sorted_d[0].controller.copy(), drone_id=1, corridor_bias=0.0, speed_multiplier=1.0))
 
         champ_controller = self.all_time_best_controller or sorted_d[0].controller
         for _ in range(int(self.size * 0.20)):
             child_net = champ_controller.copy()
             child_net.mutate(mutation_rate=0.05, sigma=0.03, rng=self.rng)
-            new_drones.append(MazeDrone(x=0.0, y=0.0, heading=0.0, controller=child_net))
+            cb = float(self.rng.uniform(-0.16, 0.16))
+            sm = float(self.rng.uniform(0.92, 1.08))
+            new_drones.append(MazeDrone(x=0.0, y=0.0, heading=0.0, controller=child_net, drone_id=len(new_drones), corridor_bias=cb, speed_multiplier=sm))
 
         while len(new_drones) < self.size:
             pa = self.rng.choice(parents)
             pb = self.rng.choice(parents)
             child_net = BatNeuralNet.uniform_crossover(pa.controller, pb.controller, rng=self.rng)
             child_net.mutate(mutation_rate=mutation_rate, sigma=sigma, rng=self.rng)
-            new_drones.append(MazeDrone(x=0.0, y=0.0, heading=0.0, controller=child_net))
+            cb = float(self.rng.uniform(-0.16, 0.16))
+            sm = float(self.rng.uniform(0.88, 1.12))
+            new_drones.append(MazeDrone(x=0.0, y=0.0, heading=0.0, controller=child_net, drone_id=len(new_drones), corridor_bias=cb, speed_multiplier=sm))
 
         self.drones = new_drones
         self.generation = next_gen
@@ -728,6 +826,8 @@ def run_maze_simulation(
     except pygame.error:
         os.environ["SDL_VIDEODRIVER"] = "dummy"
         screen = pygame.display.set_mode((win_w, win_h), pygame.RESIZABLE)
+
+    init_drone_sprites()
 
     clock = pygame.time.Clock()
     font = pygame.font.SysFont("consolas", 14, bold=True)
@@ -885,11 +985,8 @@ def run_maze_simulation(
         if fast_forward:
             for drone in pop.drones:
                 if drone.is_alive:
-                    if drone is best_drone:
-                        drone.draw(screen, draw_waves=False, draw_rays=True, is_champ=True)
-                    else:
-                        ix, iy = int(round(drone.x)), int(round(drone.y))
-                        pygame.draw.circle(screen, COLOR_SWARM_GREEN, (ix, iy), int(drone.radius))
+                    is_best = (drone is best_drone)
+                    drone.draw(screen, draw_waves=False, draw_rays=is_best, is_champ=is_best)
         else:
             for drone in pop.drones:
                 is_best = (drone is best_drone)

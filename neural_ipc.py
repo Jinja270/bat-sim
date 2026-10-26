@@ -53,23 +53,13 @@ class ActivationWriter:
         out = activations.get('outputs', np.zeros(2, dtype=np.float64))
         telem = telemetry or {}
 
-        if len(u) >= 9:
-            u_vis = np.zeros(5, dtype=np.float64)
-            u_vis[0] = min(float(u[0]), float(u[1]), float(u[2]))
-            u_vis[1] = min(float(u[4]), float(u[5]), float(u[6]))
-            u_vis[2] = float(u[3])
-            u_vis[3] = float(u[8])
-            u_vis[4] = float(u[7])
-        else:
-            u_vis = u[:5] if len(u) >= 5 else np.pad(u, (0, max(0, 5 - len(u))))
-
         if self.arr is not None:
             try:
                 self.arr[0] = self.seq
                 self.arr[1] = float(ping_freq)
                 self.arr[2] = float(speed)
                 self.arr[3] = float(heading)
-                self.arr[4:9] = u_vis[:5]
+                self.arr[4:9] = u[:5]
                 self.arr[9:41] = h1[:32]
                 self.arr[41:73] = h2[:32]
                 self.arr[73:75] = out[:2]
@@ -170,7 +160,7 @@ class ActivationReader:
                         'fps': float(self.arr[85]),
                         'ray_mode': int(self.arr[86]),
                     }
-                    return {
+                    res = {
                         'seq': seq,
                         'inputs': self.arr[4:9].copy(),
                         'h1': self.arr[9:41].copy(),
@@ -181,6 +171,9 @@ class ActivationReader:
                         'heading': float(self.arr[3]),
                         'telemetry': telem,
                     }
+                    if np.any(self.arr[87:96] != 0.0):
+                        res['full_inputs'] = self.arr[87:96].copy()
+                    return res
             except Exception:
                 pass
 

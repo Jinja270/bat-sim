@@ -30,8 +30,20 @@ class MockDroneWithActivations:
         return self
 
     def get_last_activations(self) -> Dict[str, np.ndarray]:
+        u = self.activations.get("inputs", np.zeros(5, dtype=np.float64))
+        full = self.activations.get("full_inputs", None)
+        if full is not None and len(full) >= 9:
+            u_vis = np.zeros(5, dtype=np.float64)
+            u_vis[0] = min(float(full[0]), float(full[1]), float(full[2]))
+            u_vis[1] = min(float(full[4]), float(full[5]), float(full[6]))
+            u_vis[2] = float(full[3])
+            u_vis[3] = float(full[8])
+            u_vis[4] = float(full[7])
+        else:
+            u_vis = u[:5] if len(u) >= 5 else np.zeros(5, dtype=np.float64)
+
         return {
-            "inputs": self.activations.get("inputs", np.zeros(5, dtype=np.float64)),
+            "inputs": u_vis,
             "h1": self.activations.get("h1", np.zeros(32, dtype=np.float64)),
             "h2": self.activations.get("h2", np.zeros(32, dtype=np.float64)),
             "outputs": self.activations.get("outputs", np.zeros(2, dtype=np.float64)),

@@ -381,8 +381,11 @@ class MazeDrone:
             self.delta_theta = 0.55 * self.delta_theta + 0.45 * target_steer
             self.urgency = float(out[1])
             throttle = float(out[2]) if len(out) > 2 else 0.5
+            r2_val = dists[2] * inv_max
             r3_val = dists[3] * inv_max
-            brake = 0.30 + 0.70 * min(1.0, r3_val * 3.5)
+            r4_val = dists[4] * inv_max
+            fwd_dist = min(r3_val, r2_val * 1.15, r4_val * 1.15)
+            brake = 0.30 + 0.70 * min(1.0, fwd_dist * 2.2)
             self.speed = (20.0 + 65.0 * throttle) * brake
             self.recent_ping_freq = 10.0 + 140.0 * self.urgency
 
@@ -586,8 +589,11 @@ class MazePopulation:
                 d.delta_theta = 0.55 * d.delta_theta + 0.45 * target_steer
                 d.urgency = float(urgs[k])
                 d.recent_ping_freq = 10.0 + 140.0 * d.urgency
+                r2_val = self.raw_inputs[i, 0, 2]
                 r3_val = self.raw_inputs[i, 0, 3]
-                brake = 0.30 + 0.70 * min(1.0, r3_val * 3.5)
+                r4_val = self.raw_inputs[i, 0, 4]
+                fwd_dist = min(r3_val, r2_val * 1.15, r4_val * 1.15)
+                brake = 0.30 + 0.70 * min(1.0, fwd_dist * 2.2)
                 d.speed = (20.0 + 65.0 * float(throttles[k])) * brake
                 d.controller.h_state = h1[k, 0].copy()
                 d.controller.last_inputs = X[k, 0].copy()

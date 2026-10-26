@@ -600,6 +600,8 @@ class MazePopulation:
         self.generation = 0
         self.stagnant_count = 0
         self.all_time_best_progress = 0.0
+        self.gen_start_best_progress = 0.0
+        self.new_record_this_gen = False
         self.all_time_best_controller: Optional[BatNeuralNet] = None
         self.last_status_message: str = "INITIALIZING SWARM"
         self.rng = np.random.default_rng(seed)
@@ -652,6 +654,8 @@ class MazePopulation:
     def reset_at_maze(self, maze: Maze) -> None:
         self.step_count = 0
         self.H_states.fill(0.0)
+        self.gen_start_best_progress = self.all_time_best_progress
+        self.new_record_this_gen = False
         sx, sy = maze.start_pos
         cols = 8
         spacing = 5.5
@@ -803,6 +807,7 @@ class MazePopulation:
                     old_best = self.all_time_best_progress
                     self.all_time_best_progress = prog
                     self.all_time_best_controller = d.controller.copy()
+                    self.new_record_this_gen = True
                     if prog - old_best > 0.012:
                         self.last_status_message = f"RECORD: {prog*100:.1f}% (+{(prog-old_best)*100:.1f}%)"
                         sim_log(f"[NEW RECORD] Gen {self.generation:03d} Step {self.step_count:4d}: Progress shattered {old_best*100:.1f}% -> {prog*100:.1f}% (+{(prog-old_best)*100:.1f}%) by Drone #{d.drone_id}")
@@ -823,6 +828,17 @@ class MazePopulation:
             if (gdx * gdx + gdy * gdy) <= g_rad2:
                 d.reached_goal = True
                 d.is_alive = False
+                d.max_progress = 1.0
+                self.all_time_best_progress = 1.0
+                self.all_time_best_controller = d.controller.copy()
+                self.new_record_this_gen = True
+                self.stagnant_count = 0
+                self.last_status_message = "EXIT REACHED! (100.0%)"
+                sim_log(f"[GOAL REACHED!] Drone #{d.drone_id} reached the maze exit at step {self.step_count} (Gen {self.generation:03d})!")
+                try:
+                    self.save_best("best_weights_maze.npz")
+                except Exception:
+                    pass
                 continue
 
             if maze.check_collision(d.x, d.y, d.radius):
@@ -862,102 +878,257 @@ class MazePopulation:
 
     def evaluate_fitness(self) -> None:
         for d in self.drones:
-            prog_score = (d.max_progress ** 1.6) * 6000.0
+            if d.reached_goal:
+                # Goal finishers receive a dominant bonus guaranteeing they outrank all non-finishers,
+                # with arrival speed bonus rewarding faster completion.
+                time_bonus = max(0.0, 2500.0 - d.time_alive_steps * 2.0)
+                d.fitness = float(10000.0 + time_bonus)
+            else:
+                prog_score = (d.max_progress ** 1.6) * 6000.0
 
-            efficiency_bonus = 0.0
-            if d.max_progress > 0.05:
-                efficiency_bonus = min(80.0, (d.max_progress * 1500.0) / max(1.0, d.time_alive_steps / 60.0))
+                efficiency_bonus = 0.0
+                if d.max_progress > 0.05:
+                    efficiency_bonus = min(80.0, (d.max_progress * 1500.0) / max(1.0, d.time_alive_steps / 60.0))
 
-            excess_spin = max(0.0, d.cumulative_rotation - 4.5)
-            spin_penalty = min(120.0, excess_spin * 10.0)
+                excess_spin = max(0.0, d.cumulative_rotation - 4.5)
+                spin_penalty = min(120.0, excess_spin * 10.0)
 
-            goal_bonus = 5000.0 if d.reached_goal else 0.0
-            coll_penalty = 15.0 if (d.collided and not d.reached_goal) else 0.0
-            d.fitness = float(max(0.1, prog_score + efficiency_bonus + goal_bonus - coll_penalty - spin_penalty))
+                coll_penalty = 15.0 if d.collided else 0.0
+                d.fitness = float(max(0.1, prog_score + efficiency_bonus - coll_penalty - spin_penalty))
 
     def reproduce(self, maze: Maze) -> None:
         self.evaluate_fitness()
         sorted_d = sorted(self.drones, key=lambda d: d.fitness, reverse=True)
-        pool_size = max(4, int(self.size * 0.20))
-        parents = sorted_d[:pool_size]
-
         best_drone = sorted_d[0]
-        prev_best = self.all_time_best_progress
-        if best_drone.max_progress > self.all_time_best_progress + 0.001:
-            self.all_time_best_progress = best_drone.max_progress
-            self.all_time_best_controller = best_drone.controller.copy()
-            self.stagnant_count = 0
-            stagnation_action = "NORMAL EVOLUTION"
-        else:
-            self.stagnant_count += 1
-            if self.stagnant_count < 3:
-                stagnation_action = f"MILD ADAPTATION (stagnant {self.stagnant_count})"
-            elif self.stagnant_count < 6:
-                stagnation_action = f"DIVERSITY INJECTION (stagnant {self.stagnant_count})"
-            else:
-                stagnation_action = f"CATACLYSMIC MUTATION (stagnant {self.stagnant_count})"
-
-        sim_log(
-            f"[GEN {self.generation:03d} SUMMARY] Steps: {self.step_count:4d} | "
-            f"Peak Progress: {self.all_time_best_progress*100:5.1f}% | "
-            f"Best this Gen: {best_drone.max_progress*100:5.1f}% | "
-            f"Stagnant: {self.stagnant_count:2d} gens | Status: {stagnation_action}"
-        )
-
+        finishers = [d for d in sorted_d if d.reached_goal]
         next_gen = self.generation + 1
 
-        if self.stagnant_count == 0:
-            sigma = 0.04
-            mutation_rate = 0.07
-        elif self.stagnant_count < 3:
-            sigma = 0.08
-            mutation_rate = 0.12
-        elif self.stagnant_count < 6:
-            sigma = 0.15
-            mutation_rate = 0.24
+        if len(finishers) > 0:
+            self.all_time_best_progress = 1.0
+            self.all_time_best_controller = finishers[0].controller.copy()
+            self.stagnant_count = 0
+            stagnation_action = f"GOAL CONVERGENCE ({len(finishers)} finishers)"
+            sim_log(
+                f"[GEN {self.generation:03d} SUMMARY] Steps: {self.step_count:4d} | "
+                f"Peak Progress: 100.0% | "
+                f"Finishers this Gen: {len(finishers)} | "
+                f"Fastest Finisher Time: {finishers[0].time_alive_steps} steps | "
+                f"Status: {stagnation_action}"
+            )
+            try:
+                self.save_best("best_weights_maze.npz")
+            except Exception:
+                pass
+
+            new_drones: List[MazeDrone] = []
+
+            # 1. Direct unmutated clones of champion finisher(s)
+            num_exact_clones = min(12, self.size)
+            for i in range(num_exact_clones):
+                source_finisher = finishers[i % len(finishers)]
+                new_drones.append(MazeDrone(
+                    x=0.0, y=0.0, heading=0.0,
+                    controller=source_finisher.controller.copy(),
+                    drone_id=len(new_drones),
+                    corridor_bias=0.0,
+                    speed_multiplier=1.0,
+                ))
+
+            # 2. Micro-mutations (70% of swarm): tiny perturbations to optimize speed & path lines
+            target_micro = int(self.size * 0.82)
+            while len(new_drones) < target_micro:
+                if len(finishers) > 1 and self.rng.random() < 0.40:
+                    fa = self.rng.choice(finishers)
+                    fb = self.rng.choice(finishers)
+                    child_net = BatNeuralNet.uniform_crossover(fa.controller, fb.controller, rng=self.rng)
+                else:
+                    fa = self.rng.choice(finishers)
+                    child_net = fa.controller.copy()
+                child_net.mutate(mutation_rate=0.025, sigma=0.012, rng=self.rng)
+                cb = float(self.rng.uniform(-0.08, 0.08))
+                sm = float(self.rng.uniform(0.92, 1.15))
+                new_drones.append(MazeDrone(
+                    x=0.0, y=0.0, heading=0.0,
+                    controller=child_net,
+                    drone_id=len(new_drones),
+                    corridor_bias=cb,
+                    speed_multiplier=sm,
+                ))
+
+            # 3. Fine-tuned explorers (remaining slots): slight variation from finishers
+            while len(new_drones) < self.size:
+                fa = self.rng.choice(finishers)
+                child_net = fa.controller.copy()
+                child_net.mutate(mutation_rate=0.05, sigma=0.030, rng=self.rng)
+                cb = float(self.rng.uniform(-0.15, 0.15))
+                sm = float(self.rng.uniform(0.85, 1.20))
+                new_drones.append(MazeDrone(
+                    x=0.0, y=0.0, heading=0.0,
+                    controller=child_net,
+                    drone_id=len(new_drones),
+                    corridor_bias=cb,
+                    speed_multiplier=sm,
+                ))
+
+            self.last_status_message = f"GOAL CONVERGENCE ({len(finishers)} FINISHERS)"
+            sim_log(
+                f"[FLOCK MULTIPLICATION] Gen {self.generation:03d} -> Gen {next_gen:03d}: "
+                f"Seeded with {len(finishers)} exit champions -> {num_exact_clones} direct clones + {self.size - num_exact_clones} micro-mutants"
+            )
+
+        elif self.all_time_best_progress >= 0.999 and self.all_time_best_controller is not None:
+            self.stagnant_count = 0
+            stagnation_action = "ALL-TIME CHAMPION RE-SEED"
+            sim_log(
+                f"[GEN {self.generation:03d} SUMMARY] Steps: {self.step_count:4d} | "
+                f"Peak Progress: 100.0% | Status: {stagnation_action}"
+            )
+            new_drones = []
+            num_exact_clones = min(12, self.size)
+            for _ in range(num_exact_clones):
+                new_drones.append(MazeDrone(
+                    x=0.0, y=0.0, heading=0.0,
+                    controller=self.all_time_best_controller.copy(),
+                    drone_id=len(new_drones),
+                    corridor_bias=0.0,
+                    speed_multiplier=1.0,
+                ))
+            target_micro = int(self.size * 0.82)
+            while len(new_drones) < target_micro:
+                child_net = self.all_time_best_controller.copy()
+                child_net.mutate(mutation_rate=0.025, sigma=0.012, rng=self.rng)
+                cb = float(self.rng.uniform(-0.08, 0.08))
+                sm = float(self.rng.uniform(0.92, 1.15))
+                new_drones.append(MazeDrone(
+                    x=0.0, y=0.0, heading=0.0,
+                    controller=child_net,
+                    drone_id=len(new_drones),
+                    corridor_bias=cb,
+                    speed_multiplier=sm,
+                ))
+            while len(new_drones) < self.size:
+                child_net = self.all_time_best_controller.copy()
+                child_net.mutate(mutation_rate=0.05, sigma=0.030, rng=self.rng)
+                cb = float(self.rng.uniform(-0.15, 0.15))
+                sm = float(self.rng.uniform(0.85, 1.20))
+                new_drones.append(MazeDrone(
+                    x=0.0, y=0.0, heading=0.0,
+                    controller=child_net,
+                    drone_id=len(new_drones),
+                    corridor_bias=cb,
+                    speed_multiplier=sm,
+                ))
+            self.last_status_message = "RESTORED FROM GOAL CHAMPION"
+
         else:
-            sigma = 0.24
-            mutation_rate = 0.38
+            has_new_record = self.new_record_this_gen or (best_drone.max_progress > self.gen_start_best_progress + 0.002)
+            if has_new_record:
+                if best_drone.max_progress > self.all_time_best_progress:
+                    self.all_time_best_progress = best_drone.max_progress
+                    self.all_time_best_controller = best_drone.controller.copy()
+                self.stagnant_count = 0
+                stagnation_action = "NORMAL EVOLUTION"
+            else:
+                self.stagnant_count += 1
+                if self.stagnant_count < 3:
+                    stagnation_action = f"MILD ADAPTATION (stagnant {self.stagnant_count})"
+                elif self.stagnant_count < 6:
+                    stagnation_action = f"DIVERSITY INJECTION (stagnant {self.stagnant_count})"
+                else:
+                    stagnation_action = f"CATACLYSMIC MUTATION (stagnant {self.stagnant_count})"
 
-        new_drones: List[MazeDrone] = []
+            sim_log(
+                f"[GEN {self.generation:03d} SUMMARY] Steps: {self.step_count:4d} | "
+                f"Peak Progress: {self.all_time_best_progress*100:5.1f}% | "
+                f"Best this Gen: {best_drone.max_progress*100:5.1f}% | "
+                f"Stagnant: {self.stagnant_count:2d} gens | Status: {stagnation_action}"
+            )
 
-        if self.all_time_best_controller is not None:
-            new_drones.append(MazeDrone(x=0.0, y=0.0, heading=0.0, controller=self.all_time_best_controller.copy(), drone_id=0, corridor_bias=0.0, speed_multiplier=1.0))
-        new_drones.append(MazeDrone(x=0.0, y=0.0, heading=0.0, controller=sorted_d[0].controller.copy(), drone_id=1, corridor_bias=0.0, speed_multiplier=1.0))
+            if self.stagnant_count == 0:
+                sigma = 0.04
+                mutation_rate = 0.07
+            elif self.stagnant_count < 3:
+                sigma = 0.08
+                mutation_rate = 0.12
+            elif self.stagnant_count < 6:
+                sigma = 0.15
+                mutation_rate = 0.24
+            else:
+                sigma = 0.24
+                mutation_rate = 0.38
 
-        num_immigrants = 0
-        if self.stagnant_count >= 3:
-            num_immigrants = min(int(self.size * 0.35), 6 + self.stagnant_count * 3)
-            for _ in range(num_immigrants):
-                fresh_net = BatNeuralNet(rng=self.rng)
-                fresh_net.init_scratch(rng=self.rng)
-                cb = float(self.rng.uniform(-0.35, 0.35))
-                sm = float(self.rng.uniform(0.70, 1.30))
-                new_drones.append(MazeDrone(x=0.0, y=0.0, heading=0.0, controller=fresh_net, drone_id=len(new_drones), corridor_bias=cb, speed_multiplier=sm))
-            sim_log(f"[STAGNATION RESCUE] Injected {num_immigrants} fresh exploratory immigrants into Gen {next_gen:03d} (sigma={sigma:.2f}, rate={mutation_rate:.2f})")
-            self.last_status_message = f"DIVERSITY INJECTION ({num_immigrants} IMMIGRANTS)"
-        else:
-            self.last_status_message = f"EVOLVING (Gen {next_gen})"
+            new_drones = []
+            elite_champ = self.all_time_best_controller or best_drone.controller
+            num_elites = 4 if self.stagnant_count < 4 else 2
+            for _ in range(num_elites):
+                new_drones.append(MazeDrone(
+                    x=0.0, y=0.0, heading=0.0,
+                    controller=elite_champ.copy(),
+                    drone_id=len(new_drones),
+                    corridor_bias=0.0,
+                    speed_multiplier=1.0,
+                ))
+            if best_drone.controller is not elite_champ:
+                new_drones.append(MazeDrone(
+                    x=0.0, y=0.0, heading=0.0,
+                    controller=best_drone.controller.copy(),
+                    drone_id=len(new_drones),
+                    corridor_bias=0.0,
+                    speed_multiplier=1.0,
+                ))
 
-        champ_controller = self.all_time_best_controller or sorted_d[0].controller
-        clone_count = max(2, int(self.size * 0.10)) if self.stagnant_count < 3 else 1
-        for _ in range(clone_count):
-            if len(new_drones) >= self.size:
-                break
-            child_net = champ_controller.copy()
-            child_net.mutate(mutation_rate=mutation_rate * 0.7, sigma=sigma * 0.7, rng=self.rng)
-            cb = float(self.rng.uniform(-0.25, 0.25))
-            sm = float(self.rng.uniform(0.85, 1.15))
-            new_drones.append(MazeDrone(x=0.0, y=0.0, heading=0.0, controller=child_net, drone_id=len(new_drones), corridor_bias=cb, speed_multiplier=sm))
+            if self.stagnant_count >= 3:
+                num_immigrants = min(int(self.size * 0.25), 4 + self.stagnant_count * 2)
+                for _ in range(num_immigrants):
+                    fresh_net = BatNeuralNet(rng=self.rng)
+                    fresh_net.init_scratch(rng=self.rng)
+                    cb = float(self.rng.uniform(-0.35, 0.35))
+                    sm = float(self.rng.uniform(0.70, 1.30))
+                    new_drones.append(MazeDrone(
+                        x=0.0, y=0.0, heading=0.0,
+                        controller=fresh_net,
+                        drone_id=len(new_drones),
+                        corridor_bias=cb,
+                        speed_multiplier=sm,
+                    ))
+                sim_log(f"[STAGNATION RESCUE] Injected {num_immigrants} fresh exploratory immigrants into Gen {next_gen:03d} (sigma={sigma:.2f}, rate={mutation_rate:.2f})")
+                self.last_status_message = f"DIVERSITY INJECTION ({num_immigrants} IMMIGRANTS)"
+            else:
+                self.last_status_message = f"EVOLVING (Gen {next_gen})"
 
-        while len(new_drones) < self.size:
-            pa = self.rng.choice(parents)
-            pb = self.rng.choice(parents)
-            child_net = BatNeuralNet.uniform_crossover(pa.controller, pb.controller, rng=self.rng)
-            child_net.mutate(mutation_rate=mutation_rate, sigma=sigma, rng=self.rng)
-            cb = float(self.rng.uniform(-0.30, 0.30))
-            sm = float(self.rng.uniform(0.75, 1.25))
-            new_drones.append(MazeDrone(x=0.0, y=0.0, heading=0.0, controller=child_net, drone_id=len(new_drones), corridor_bias=cb, speed_multiplier=sm))
+            pool_size = max(4, int(self.size * 0.20))
+            parents = sorted_d[:pool_size]
+
+            clone_count = max(4, int(self.size * 0.15)) if self.stagnant_count < 3 else 2
+            for _ in range(clone_count):
+                if len(new_drones) >= self.size:
+                    break
+                child_net = elite_champ.copy()
+                child_net.mutate(mutation_rate=mutation_rate * 0.6, sigma=sigma * 0.6, rng=self.rng)
+                cb = float(self.rng.uniform(-0.20, 0.20))
+                sm = float(self.rng.uniform(0.85, 1.15))
+                new_drones.append(MazeDrone(
+                    x=0.0, y=0.0, heading=0.0,
+                    controller=child_net,
+                    drone_id=len(new_drones),
+                    corridor_bias=cb,
+                    speed_multiplier=sm,
+                ))
+
+            while len(new_drones) < self.size:
+                pa = self.rng.choice(parents)
+                pb = self.rng.choice(parents)
+                child_net = BatNeuralNet.uniform_crossover(pa.controller, pb.controller, rng=self.rng)
+                child_net.mutate(mutation_rate=mutation_rate, sigma=sigma, rng=self.rng)
+                cb = float(self.rng.uniform(-0.30, 0.30))
+                sm = float(self.rng.uniform(0.75, 1.25))
+                new_drones.append(MazeDrone(
+                    x=0.0, y=0.0, heading=0.0,
+                    controller=child_net,
+                    drone_id=len(new_drones),
+                    corridor_bias=cb,
+                    speed_multiplier=sm,
+                ))
 
         self.drones = new_drones
         self.generation = next_gen
@@ -965,11 +1136,14 @@ class MazePopulation:
         self.reset_at_maze(maze)
 
     def get_best_drone(self) -> MazeDrone:
-        return max(self.drones, key=lambda d: (d.max_progress, d.distance_traveled))
+        return max(self.drones, key=lambda d: (1 if d.reached_goal else 0, d.max_progress, d.fitness, d.distance_traveled))
 
     def save_best(self, filepath: str) -> None:
-        best = self.get_best_drone()
-        best.controller.save(filepath)
+        if self.all_time_best_controller is not None:
+            self.all_time_best_controller.save(filepath)
+        else:
+            best = self.get_best_drone()
+            best.controller.save(filepath)
 
     def load_champion(self, filepath: str) -> BatNeuralNet:
         return BatNeuralNet.load(filepath, rng=self.rng)
@@ -1207,7 +1381,7 @@ def run_maze_simulation(
                             d.controller = champ.copy()
                     else:
                         best_curr = pop.get_best_drone()
-                        if best_curr.max_progress > 0.20:
+                        if (best_curr.reached_goal or best_curr.max_progress >= pop.all_time_best_progress) and best_curr.max_progress > 0.15:
                             save_path = "best_weights_maze.npz"
                             try:
                                 pop.save_best(save_path)

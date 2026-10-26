@@ -140,11 +140,35 @@ class Maze:
         gy = int(y / self.cell_size)
         if 0 <= gx < self.cols and 0 <= gy < self.rows:
             dg = self.dist_field[gy, gx]
-            ds = self.dist_start[gy, gx]
-            p_goal = (self.start_to_goal_dist - dg) / self.start_to_goal_dist if dg >= 0.0 else 0.0
-            p_exp = (ds / self.max_corridor_depth) * 0.85 if ds >= 0.0 else 0.0
-            return max(0.0, min(1.0, max(p_goal, p_exp)))
+            if dg >= 0.0:
+                return max(0.0, min(1.0, (self.start_to_goal_dist - dg) / self.start_to_goal_dist))
         return 0.0
+
+    def get_acoustic_beacon_angle(self, x: float, y: float) -> float:
+        gx = int(x / self.cell_size)
+        gy = int(y / self.cell_size)
+        gx = max(0, min(self.cols - 1, gx))
+        gy = max(0, min(self.rows - 1, gy))
+
+        current_dg = self.dist_field[gy, gx]
+        best_target_x = self.goal_pos[0]
+        best_target_y = self.goal_pos[1]
+
+        if current_dg > 0:
+            best_dg = current_dg
+            best_cell = None
+            for dx, dy in [(0, 1), (0, -1), (1, 0), (-1, 0)]:
+                nx, ny = gx + dx, gy + dy
+                if 0 <= nx < self.cols and 0 <= ny < self.rows:
+                    if self.grid[ny, nx] == 0 and self.dist_field[ny, nx] >= 0:
+                        if self.dist_field[ny, nx] < best_dg:
+                            best_dg = self.dist_field[ny, nx]
+                            best_cell = (nx, ny)
+            if best_cell is not None:
+                best_target_x = (best_cell[0] + 0.5) * self.cell_size
+                best_target_y = (best_cell[1] + 0.5) * self.cell_size
+
+        return math.atan2(best_target_y - y, best_target_x - x)
 
     def check_collision(self, x: float, y: float, radius: float = 6.0) -> bool:
         if x - radius <= 0.0 or x + radius >= self.width or y - radius <= 0.0 or y + radius >= self.height:
@@ -345,9 +369,7 @@ class MazeDrone:
             inv_max = 1.0 / self.max_range
             r_norm = [d * inv_max for d in dists]
 
-            dx = maze.goal_pos[0] - self.x
-            dy = maze.goal_pos[1] - self.y
-            target_ang = math.atan2(dy, dx)
+            target_ang = maze.get_acoustic_beacon_angle(self.x, self.y)
             bearing = (target_ang - self.heading + math.pi) % (2.0 * math.pi) - math.pi
             norm_bearing = bearing / math.pi
             norm_v = self.speed / 85.0
@@ -355,10 +377,13 @@ class MazeDrone:
             raw_in = np.array(r_norm + [norm_bearing, norm_v], dtype=np.float64)
             out = self.controller.forward(raw_in)
 
-            self.delta_theta = float(out[0])
+            target_steer = float(out[0])
+            self.delta_theta = 0.55 * self.delta_theta + 0.45 * target_steer
             self.urgency = float(out[1])
             throttle = float(out[2]) if len(out) > 2 else 0.5
-            self.speed = 40.0 + 45.0 * throttle
+            r3_val = dists[3] * inv_max
+            brake = 0.30 + 0.70 * min(1.0, r3_val * 3.5)
+            self.speed = (20.0 + 65.0 * throttle) * brake
             self.recent_ping_freq = 10.0 + 140.0 * self.urgency
 
         self.heading = (self.heading + self.delta_theta * self.turning_rate_scale * dt) % (2.0 * math.pi)
@@ -376,7 +401,7 @@ class MazeDrone:
             self.stagnant_steps = 0
         else:
             self.stagnant_steps += 1
-            if self.stagnant_steps > 180:
+            if self.stagnant_steps > 700:
                 self.is_alive = False
                 self.collided = True
                 return
@@ -524,9 +549,7 @@ class MazePopulation:
                 r6 = maze.raycast(d.x, d.y, h + RAY_OFFSETS[6], 240.0)
                 d.last_dists = [r0, r1, r2, r3, r4, r5, r6]
 
-                dx = gx - d.x
-                dy = gy - d.y
-                target_ang = math.atan2(dy, dx)
+                target_ang = maze.get_acoustic_beacon_angle(d.x, d.y)
                 bearing = (target_ang - h + math.pi) % (2.0 * math.pi) - math.pi
 
                 self.raw_inputs[i, 0, 0] = r0 * inv_max_range
@@ -559,10 +582,13 @@ class MazePopulation:
 
             for k, i in enumerate(ping_indices):
                 d = self.drones[i]
-                d.delta_theta = float(dthetas[k])
+                target_steer = float(dthetas[k])
+                d.delta_theta = 0.55 * d.delta_theta + 0.45 * target_steer
                 d.urgency = float(urgs[k])
                 d.recent_ping_freq = 10.0 + 140.0 * d.urgency
-                d.speed = 40.0 + 45.0 * float(throttles[k])
+                r3_val = self.raw_inputs[i, 0, 3]
+                brake = 0.30 + 0.70 * min(1.0, r3_val * 3.5)
+                d.speed = (20.0 + 65.0 * float(throttles[k])) * brake
                 d.controller.h_state = h1[k, 0].copy()
                 d.controller.last_inputs = X[k, 0].copy()
                 d.controller.last_h1 = h1[k, 0].copy()
@@ -587,7 +613,7 @@ class MazePopulation:
                 d.stagnant_steps = 0
             else:
                 d.stagnant_steps += 1
-                if d.stagnant_steps > 180:
+                if d.stagnant_steps > 700:
                     d.is_alive = False
                     d.collided = True
                     continue

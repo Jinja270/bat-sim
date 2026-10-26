@@ -155,7 +155,9 @@ def run_maze_hud_window(steps_limit: Optional[int] = None) -> None:
         screen.blit(t_reached, (24, grid_y + 80))
 
         # Row 5: Path Progress + Big Bar
-        t_prog_label = body_font.render(f"Path Progress: {progress:.1f}% along shortest path", True, COLOR_WHITE)
+        cur_prog = float(telem.get("cur_progress", progress))
+        prog_str = f"Path Progress: {progress:.1f}% (Cur Gen: {cur_prog:.1f}%)" if cur_prog < progress else f"Path Progress: {progress:.1f}% along shortest path"
+        t_prog_label = body_font.render(prog_str, True, COLOR_WHITE)
         screen.blit(t_prog_label, (24, grid_y + 104))
 
         bar_x = 24
@@ -163,12 +165,15 @@ def run_maze_hud_window(steps_limit: Optional[int] = None) -> None:
         bar_w = w - 68
         bar_h = 16
         pygame.draw.rect(screen, COLOR_DARK_BAR, (bar_x, bar_y, bar_w, bar_h), border_radius=4)
-        fill_w = int(bar_w * (min(100.0, max(0.0, progress)) / 100.0))
-        if fill_w > 0:
+        fill_peak = int(bar_w * (min(100.0, max(0.0, progress)) / 100.0))
+        if fill_peak > 0:
             fill_col = COLOR_CYAN if progress < 90.0 else COLOR_GOLD
-            pygame.draw.rect(screen, fill_col, (bar_x, bar_y, fill_w, bar_h), border_radius=4)
+            pygame.draw.rect(screen, fill_col, (bar_x, bar_y, fill_peak, bar_h), border_radius=4)
             # Gloss highlight
-            pygame.draw.rect(screen, (255, 255, 255, 70), (bar_x, bar_y, fill_w, 4), border_radius=2)
+            pygame.draw.rect(screen, (255, 255, 255, 70), (bar_x, bar_y, fill_peak, 4), border_radius=2)
+        fill_cur = int(bar_w * (min(100.0, max(0.0, cur_prog)) / 100.0))
+        if fill_cur > 0 and fill_cur < fill_peak:
+            pygame.draw.rect(screen, (150, 255, 210), (bar_x, bar_y, fill_cur, bar_h), border_radius=4)
         pygame.draw.rect(screen, COLOR_CARD_BORDER, (bar_x, bar_y, bar_w, bar_h), 1, border_radius=4)
 
         # Row 6: Echolocation & Kinematics

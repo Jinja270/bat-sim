@@ -760,6 +760,9 @@ class MazePopulation:
             prog = maze.get_progress(d.x, d.y)
             if prog > d.max_progress:
                 d.max_progress = prog
+                if prog > self.all_time_best_progress:
+                    self.all_time_best_progress = prog
+                    self.all_time_best_controller = d.controller.copy()
 
             if d.max_progress > d.last_progress_check + 0.005:
                 d.last_progress_check = d.max_progress
@@ -1112,7 +1115,11 @@ def run_maze_simulation(
 
         alive_count = sum(1 for d in pop.drones if d.is_alive)
         reached_count = sum(1 for d in pop.drones if d.reached_goal)
-        best_prog = best_drone.max_progress * 100.0 if best_drone else 0.0
+        cur_prog = (best_drone.max_progress * 100.0) if best_drone else 0.0
+        if best_drone and best_drone.max_progress > pop.all_time_best_progress:
+            pop.all_time_best_progress = best_drone.max_progress
+            pop.all_time_best_controller = best_drone.controller.copy()
+        peak_prog = pop.all_time_best_progress * 100.0
         fps = clock.get_fps()
 
         telem_data = {
@@ -1121,7 +1128,8 @@ def run_maze_simulation(
             "alive": alive_count,
             "pop_size": pop.size,
             "reached": reached_count,
-            "progress": best_prog,
+            "progress": peak_prog,
+            "cur_progress": cur_prog,
             "step": pop.step_count,
             "max_steps": pop.max_steps,
             "paused": 1 if paused else 0,
@@ -1154,11 +1162,12 @@ def run_maze_simulation(
             hud_surf.blit(t_title, (14, 10))
 
             mode_str = "CHAMPION DEMO [E]" if demo_mode else ("TRAINING FROM SCRATCH [E]" if getattr(pop, "scratch", False) else "EVOLVING SWARM [E]")
+            prog_label = f"Best Progress: {peak_prog:.1f}% (Cur: {cur_prog:.1f}%)" if cur_prog < peak_prog else f"Best Progress: {peak_prog:.1f}% along maze path"
             lines = [
                 f"Generation   : {pop.generation} ({mode_str})",
                 f"Swarm Alive  : {alive_count} / {pop.size} ({alive_count/pop.size*100:.1f}%)",
                 f"Exit Reached : {reached_count} drones",
-                f"Best Progress: {best_prog:.1f}% along maze path",
+                prog_label,
                 f"Speed / Pulse: {best_drone.speed:.1f} px/s | {best_drone.recent_ping_freq:.1f} Hz",
                 f"Step Count   : {pop.step_count} (unlimited)",
             ]
@@ -1171,10 +1180,13 @@ def run_maze_simulation(
 
             bar_x, bar_y, bar_w, bar_h = 14, yo + 4, card_w - 28, 8
             pygame.draw.rect(hud_surf, (30, 40, 55), (bar_x, bar_y, bar_w, bar_h), border_radius=3)
-            fill_w = int(bar_w * (best_prog / 100.0))
-            if fill_w > 0:
-                bar_color = (0, 240, 160) if best_prog < 95.0 else (255, 215, 0)
-                pygame.draw.rect(hud_surf, bar_color, (bar_x, bar_y, fill_w, bar_h), border_radius=3)
+            fill_peak = int(bar_w * (peak_prog / 100.0))
+            if fill_peak > 0:
+                bar_color = (0, 240, 160) if peak_prog < 95.0 else (255, 215, 0)
+                pygame.draw.rect(hud_surf, bar_color, (bar_x, bar_y, fill_peak, bar_h), border_radius=3)
+            fill_cur = int(bar_w * (cur_prog / 100.0))
+            if fill_cur > 0 and fill_cur < fill_peak:
+                pygame.draw.rect(hud_surf, (150, 255, 210), (bar_x, bar_y, fill_cur, bar_h), border_radius=3)
 
             status_str = "PAUSED [Space]" if paused else f"SPEED: {sim_speed}x [F/1-5] ({fps:.0f} FPS)"
             t_sub = small_font.render(f"{status_str} | Rays: {ray_mode.upper()} [D] | HUD: [H]/[O]", True, (160, 175, 195))

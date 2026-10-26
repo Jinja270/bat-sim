@@ -101,65 +101,43 @@ class BatNeuralNet:
             self.w2[i, i] += 1.0
 
         # Direct Spinal Reflex Skip Connections:
-        # Reflex 1: Left wall close (r0, r1, r2 small) -> turn right (positive delta_theta)
-        # Reflex 2: Right wall close (r4, r5, r6 small) -> turn left (negative delta_theta)
-        # Symmetrically balanced when both sides equal
-        self.w_skip[0, 0] -= 0.6  # r0 (-90 deg)
-        self.w_skip[1, 0] -= 1.0  # r1 (-59 deg)
-        self.w_skip[2, 0] -= 1.4  # r2 (-31 deg)
-        self.w_skip[4, 0] += 1.4  # r4 (+31 deg)
-        self.w_skip[5, 0] += 1.0  # r5 (+59 deg)
-        self.w_skip[6, 0] += 0.6  # r6 (+90 deg)
+        # Reflex 1: Goal bearing tracking - decisive heading authority toward acoustic beacon
+        self.w_skip[7, 0] = 1.4
 
-        # Reflex 3: Goal bearing tracking
-        self.w_skip[7, 0] += 0.6  # Goal bearing -> steer toward goal
-
-        # Reflex 4: Throttle & Braking (Output 2)
+        # Reflex 2: Throttle & Braking (Output 2)
         # Open front corridor (r3 high) -> sprint; blocked front (r3 low) -> brake
         self.w_skip[3, 2] += 2.8  # Center ray directly excites throttle
         self.w_skip[2, 2] += 0.8  # Forward-left open helps maintain speed
         self.w_skip[4, 2] += 0.8  # Forward-right open helps maintain speed
 
-        # Reflex 5: Urgency / Pulse Frequency (Output 1)
+        # Reflex 3: Urgency / Pulse Frequency (Output 1)
         self.w_skip[3, 1] -= 2.2
         self.b3[1] += 1.8
 
         # Cortical Hidden Layer feature wiring:
-        # Neuron 0: Left proximity reflex
+        # Non-linear proximity reflexes: strictly activate when wall is close (<40px)
+        # Neuron 0: Left proximity reflex -> steer right
         self.w1[0, 0] -= 2.5
         self.w1[1, 0] -= 3.5
-        self.w1[2, 0] -= 4.0
-        self.b1[0] += 1.2
-        self.w3[0, 0] += 2.0
+        self.w1[2, 0] -= 5.0
+        self.b1[0] += 1.5
+        self.w3[0, 0] += 2.5
 
-        # Neuron 1: Right proximity reflex
-        self.w1[4, 1] -= 4.0
+        # Neuron 1: Right proximity reflex -> steer left
+        self.w1[4, 1] -= 5.0
         self.w1[5, 1] -= 3.5
         self.w1[6, 1] -= 2.5
-        self.b1[1] += 1.2
-        self.w3[1, 0] -= 2.0
+        self.b1[1] += 1.5
+        self.w3[1, 0] -= 2.5
 
-        # Neuron 2: Dead-end escape right (front blocked, right side open)
-        self.w1[3, 2] -= 5.0
-        self.w1[5, 2] += 3.5
-        self.w1[6, 2] += 3.0
-        self.b1[2] += 1.2
-        self.w3[2, 0] += 3.0
-
-        # Neuron 3: Dead-end escape left (front blocked, left side open)
-        self.w1[3, 3] -= 5.0
-        self.w1[0, 3] += 3.0
-        self.w1[1, 3] += 3.5
-        self.b1[3] += 1.2
-        self.w3[3, 0] -= 3.0
-
+        # Neurons 4 & 5: Cortical beacon neurons
         # Neuron 4: Goal bearing right
-        self.w1[7, 4] += 2.5
-        self.w3[4, 0] += 0.6
+        self.w1[7, 4] += 3.5
+        self.w3[4, 0] += 1.2
 
         # Neuron 5: Goal bearing left
-        self.w1[7, 5] -= 2.5
-        self.w3[5, 0] -= 0.6
+        self.w1[7, 5] -= 3.5
+        self.w3[5, 0] -= 1.2
 
     def forward(self, inputs: Union[np.ndarray, Sequence[float]]) -> np.ndarray:
         x_in = np.asarray(inputs, dtype=np.float64)

@@ -87,9 +87,11 @@ def init_drone_sprites() -> None:
 
 
 class Maze:
-    def __init__(self, cols: int = 35, rows: int = 22, cell_size: float = 40.0, seed: Optional[int] = None) -> None:
-        self.cols = int(cols)
-        self.rows = int(rows)
+    def __init__(self, cols: int = 23, rows: int = 23, cell_size: float = 38.0, seed: Optional[int] = None) -> None:
+        c = int(cols)
+        r = int(rows)
+        self.cols = c if c % 2 == 1 else max(7, c - 1)
+        self.rows = r if r % 2 == 1 else max(7, r - 1)
         self.cell_size = float(cell_size)
         self.width = self.cols * self.cell_size
         self.height = self.rows * self.cell_size
@@ -880,9 +882,9 @@ class MazePopulation:
 
 
 def run_maze_simulation(
-    cols: int = 28,
-    rows: int = 18,
-    cell_size: float = 40.0,
+    cols: int = 23,
+    rows: int = 23,
+    cell_size: float = 38.0,
     pop_size: int = 80,
     max_steps: int = 2500,
     steps_limit: Optional[int] = None,
@@ -896,13 +898,19 @@ def run_maze_simulation(
         os.environ["SDL_VIDEODRIVER"] = "dummy"
 
     if "SDL_VIDEO_WINDOW_POS" not in os.environ and not headless:
-        os.environ["SDL_VIDEO_WINDOW_POS"] = "10,50"
+        os.environ["SDL_VIDEO_WINDOW_POS"] = "15,50"
 
     pygame.init()
     pygame.font.init()
 
-    win_w = int(cols * cell_size)
-    win_h = int(rows * cell_size)
+    maze = Maze(cols=cols, rows=rows, cell_size=cell_size)
+    world_w = int(maze.width)
+    world_h = int(maze.height)
+    world_surf = pygame.Surface((world_w, world_h))
+
+    # Balanced square window for side-by-side recording on 1080p
+    win_w = 930
+    win_h = 930
 
     try:
         screen = pygame.display.set_mode((win_w, win_h), pygame.RESIZABLE)
@@ -917,7 +925,6 @@ def run_maze_simulation(
     font = pygame.font.SysFont("consolas", 14, bold=True)
     small_font = pygame.font.SysFont("consolas", 12)
 
-    maze = Maze(cols=cols, rows=rows, cell_size=cell_size)
     pop = MazePopulation(size=pop_size, max_steps=max_steps, scratch=scratch)
     pop.reset_at_maze(maze)
 
@@ -973,6 +980,10 @@ def run_maze_simulation(
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 running = False
+            elif event.type == pygame.VIDEORESIZE:
+                win_w = max(360, event.w)
+                win_h = max(360, event.h)
+                screen = pygame.display.set_mode((win_w, win_h), pygame.RESIZABLE)
             elif event.type == pygame.KEYDOWN:
                 if event.key == pygame.K_ESCAPE:
                     running = False
@@ -1072,8 +1083,8 @@ def run_maze_simulation(
             if steps_limit and total_frames >= steps_limit:
                 running = False
 
-        screen.fill(COLOR_FLOOR)
-        maze.draw(screen)
+        world_surf.fill(COLOR_FLOOR)
+        maze.draw(world_surf)
 
         best_drone = pop.get_best_drone()
         ray_mode = ray_modes[ray_mode_idx]
@@ -1082,12 +1093,22 @@ def run_maze_simulation(
             for drone in pop.drones:
                 if drone.is_alive:
                     is_best = (drone is best_drone)
-                    drone.draw(screen, draw_waves=False, draw_rays=is_best, is_champ=is_best)
+                    drone.draw(world_surf, draw_waves=False, draw_rays=is_best, is_champ=is_best)
         else:
             for drone in pop.drones:
                 is_best = (drone is best_drone)
                 draw_r = (ray_mode == "all") or (ray_mode == "best" and is_best)
-                drone.draw(screen, draw_waves=show_waves, draw_rays=draw_r, is_champ=is_best)
+                drone.draw(world_surf, draw_waves=show_waves, draw_rays=draw_r, is_champ=is_best)
+
+        scale = min(win_w / world_w, win_h / world_h)
+        scaled_w = max(1, int(round(world_w * scale)))
+        scaled_h = max(1, int(round(world_h * scale)))
+        scaled_surf = pygame.transform.smoothscale(world_surf, (scaled_w, scaled_h))
+        offset_x = (win_w - scaled_w) // 2
+        offset_y = (win_h - scaled_h) // 2
+
+        screen.fill(COLOR_FLOOR)
+        screen.blit(scaled_surf, (offset_x, offset_y))
 
         alive_count = sum(1 for d in pop.drones if d.is_alive)
         reached_count = sum(1 for d in pop.drones if d.reached_goal)
@@ -1123,8 +1144,8 @@ def run_maze_simulation(
 
         if show_hud:
             card_w, card_h = 360, 210
-            card_x = 15
-            card_y = win_h - card_h - 15
+            card_x = max(15, (win_w - card_w) // 2) if win_w < 500 else 15
+            card_y = max(15, win_h - card_h - 15)
             hud_surf = pygame.Surface((card_w, card_h), pygame.SRCALPHA)
             pygame.draw.rect(hud_surf, (15, 20, 30, 230), (0, 0, card_w, card_h), border_radius=8)
             pygame.draw.rect(hud_surf, (0, 240, 160, 240), (0, 0, card_w, card_h), 1, border_radius=8)
@@ -1182,9 +1203,9 @@ def run_maze_simulation(
 if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser(description="Autonomous Swarm Maze Navigation")
-    parser.add_argument("--cols", type=int, default=28, help="Maze columns (default: 28 for side-by-side recording)")
-    parser.add_argument("--rows", type=int, default=18, help="Maze rows (default: 18 for side-by-side recording)")
-    parser.add_argument("--cell-size", type=float, default=40.0, help="Grid cell size")
+    parser.add_argument("--cols", type=int, default=23, help="Maze columns (default: 23 for side-by-side recording)")
+    parser.add_argument("--rows", type=int, default=23, help="Maze rows (default: 23 for side-by-side recording)")
+    parser.add_argument("--cell-size", type=float, default=38.0, help="Grid cell size")
     parser.add_argument("--pop-size", type=int, default=80, help="Swarm population size (default: 80)")
     parser.add_argument("--max-steps", type=int, default=2500, help="Max steps per episode")
     parser.add_argument("--weights", type=str, default=None, help="Weights file to load")

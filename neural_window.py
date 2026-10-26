@@ -9,8 +9,8 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 from bat_sim.neural_ipc import ActivationReader
 from bat_sim.neural_visualizer import NeuralNetworkVisualizer
 
-WINDOW_WIDTH: int = 760
-WINDOW_HEIGHT: int = 720
+WINDOW_WIDTH: int = 930
+WINDOW_HEIGHT: int = 930
 TARGET_FPS: int = 60
 
 
@@ -42,7 +42,7 @@ def run_neural_window() -> None:
     import pygame
 
     if "SDL_VIDEO_WINDOW_POS" not in os.environ and os.environ.get("SDL_VIDEODRIVER") != "dummy":
-        os.environ["SDL_VIDEO_WINDOW_POS"] = "1135,50"
+        os.environ["SDL_VIDEO_WINDOW_POS"] = "965,50"
 
     if os.environ.get("SDL_VIDEODRIVER") == "dummy":
         os.environ["SDL_VIDEODRIVER"] = "dummy"

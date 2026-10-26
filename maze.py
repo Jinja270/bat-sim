@@ -605,6 +605,7 @@ class MazePopulation:
         self.W_skip = np.zeros((self.size, 9, 3), dtype=np.float64)
         self.H_states = np.zeros((self.size, 1, 32), dtype=np.float64)
         self.raw_inputs = np.zeros((self.size, 1, 9), dtype=np.float64)
+        self.coords = np.zeros((self.size, 3), dtype=np.float64)
         for i, d in enumerate(self.drones):
             c = d.controller
             self.W1[i] = c.w1
@@ -616,6 +617,9 @@ class MazePopulation:
             self.B3[i, 0] = c.b3
             self.W_skip[i] = c.w_skip
             self.H_states[i, 0] = c.h_state
+            self.coords[i, 0] = d.x
+            self.coords[i, 1] = d.y
+            self.coords[i, 2] = d.heading
 
     def reset_at_maze(self, maze: Maze) -> None:
         self.step_count = 0
@@ -632,6 +636,9 @@ class MazePopulation:
             py = sy + float(np.clip(oy, -24.0, 24.0))
             head = float(self.rng.uniform(-0.15, 0.15))
             drone.reset(px, py, head)
+            self.coords[i, 0] = px
+            self.coords[i, 1] = py
+            self.coords[i, 2] = head
 
     def step(self, dt: float, maze: Maze) -> bool:
         self.step_count += 1
@@ -713,9 +720,10 @@ class MazePopulation:
 
         # 1. Anti-tailgating following-distance brake (wake turbulence avoidance)
         if len(alive_indices) > 1:
-            alive_xs = np.array([self.drones[i].x for i in alive_indices], dtype=np.float64)
-            alive_ys = np.array([self.drones[i].y for i in alive_indices], dtype=np.float64)
-            heads = np.array([self.drones[i].heading for i in alive_indices], dtype=np.float64)
+            idx_arr = np.array(alive_indices, dtype=np.int32)
+            alive_xs = self.coords[idx_arr, 0]
+            alive_ys = self.coords[idx_arr, 1]
+            heads = self.coords[idx_arr, 2]
 
             dx_fwd = alive_xs[None, :] - alive_xs[:, None]
             dy_fwd = alive_ys[None, :] - alive_ys[:, None]
@@ -740,6 +748,9 @@ class MazePopulation:
             d.x += step_dist * math.cos(d.heading)
             d.y += step_dist * math.sin(d.heading)
             d.distance_traveled += step_dist
+            self.coords[i, 0] = d.x
+            self.coords[i, 1] = d.y
+            self.coords[i, 2] = d.heading
 
             if d.time_alive_steps % 3 == 0:
                 d.trail.append((d.x, d.y))
@@ -772,8 +783,9 @@ class MazePopulation:
         # 2. Flocking mutual separation (anti-crowding soft repulsion)
         alive_after = [i for i in alive_indices if self.drones[i].is_alive]
         if len(alive_after) > 1:
-            alive_xs = np.array([self.drones[i].x for i in alive_after], dtype=np.float64)
-            alive_ys = np.array([self.drones[i].y for i in alive_after], dtype=np.float64)
+            aft_arr = np.array(alive_after, dtype=np.int32)
+            alive_xs = self.coords[aft_arr, 0]
+            alive_ys = self.coords[aft_arr, 1]
             dx = alive_xs[:, None] - alive_xs[None, :]
             dy = alive_ys[:, None] - alive_ys[None, :]
             d2 = dx * dx + dy * dy
@@ -794,6 +806,8 @@ class MazePopulation:
                     if not maze.check_collision(nx, ny, d.radius):
                         d.x = nx
                         d.y = ny
+                        self.coords[i, 0] = nx
+                        self.coords[i, 1] = ny
 
         return not any(self.drones[i].is_alive for i in alive_indices)
 
@@ -866,8 +880,8 @@ class MazePopulation:
 
 
 def run_maze_simulation(
-    cols: int = 35,
-    rows: int = 22,
+    cols: int = 28,
+    rows: int = 18,
     cell_size: float = 40.0,
     pop_size: int = 80,
     max_steps: int = 2500,
@@ -880,6 +894,9 @@ def run_maze_simulation(
 ) -> None:
     if headless:
         os.environ["SDL_VIDEODRIVER"] = "dummy"
+
+    if "SDL_VIDEO_WINDOW_POS" not in os.environ and not headless:
+        os.environ["SDL_VIDEO_WINDOW_POS"] = "10,50"
 
     pygame.init()
     pygame.font.init()
@@ -920,7 +937,8 @@ def run_maze_simulation(
 
     demo_mode = False
     paused = False
-    fast_forward = False
+    sim_speed = 1
+    SPEED_OPTIONS = [1, 2, 3, 5]
     show_waves = False
     show_hud = not hud_window
     ray_modes = ["best", "all", "none"]
@@ -961,7 +979,18 @@ def run_maze_simulation(
                 elif event.key == pygame.K_SPACE:
                     paused = not paused
                 elif event.key == pygame.K_f:
-                    fast_forward = not fast_forward
+                    curr_i = SPEED_OPTIONS.index(sim_speed) if sim_speed in SPEED_OPTIONS else 0
+                    sim_speed = SPEED_OPTIONS[(curr_i + 1) % len(SPEED_OPTIONS)]
+                elif event.key == pygame.K_1:
+                    sim_speed = 1
+                elif event.key == pygame.K_2:
+                    sim_speed = 2
+                elif event.key == pygame.K_3:
+                    sim_speed = 3
+                elif event.key == pygame.K_4:
+                    sim_speed = 4
+                elif event.key == pygame.K_5:
+                    sim_speed = 5
                 elif event.key == pygame.K_e:
                     demo_mode = not demo_mode
                     save_path = "best_weights_maze.npz"
@@ -1020,7 +1049,7 @@ def run_maze_simulation(
                         d.speed = max(40.0, d.speed - 15.0)
 
         if not paused:
-            steps_per_frame = 10 if fast_forward else 1
+            steps_per_frame = sim_speed
             for _ in range(steps_per_frame):
                 done = pop.step(dt, maze)
                 if done:
@@ -1049,7 +1078,7 @@ def run_maze_simulation(
         best_drone = pop.get_best_drone()
         ray_mode = ray_modes[ray_mode_idx]
 
-        if fast_forward:
+        if sim_speed > 1:
             for drone in pop.drones:
                 if drone.is_alive:
                     is_best = (drone is best_drone)
@@ -1063,7 +1092,7 @@ def run_maze_simulation(
         alive_count = sum(1 for d in pop.drones if d.is_alive)
         reached_count = sum(1 for d in pop.drones if d.reached_goal)
         best_prog = best_drone.max_progress * 100.0 if best_drone else 0.0
-        fps = clock.get_fps() if not fast_forward else 1000.0
+        fps = clock.get_fps()
 
         telem_data = {
             "gen": pop.generation,
@@ -1075,7 +1104,7 @@ def run_maze_simulation(
             "step": pop.step_count,
             "max_steps": pop.max_steps,
             "paused": 1 if paused else 0,
-            "fast_forward": 1 if fast_forward else 0,
+            "fast_forward": 1 if sim_speed > 1 else 0,
             "fps": fps,
             "ray_mode": ray_mode_idx,
         }
@@ -1126,7 +1155,7 @@ def run_maze_simulation(
                 bar_color = (0, 240, 160) if best_prog < 95.0 else (255, 215, 0)
                 pygame.draw.rect(hud_surf, bar_color, (bar_x, bar_y, fill_w, bar_h), border_radius=3)
 
-            status_str = "PAUSED [Space]" if paused else ("FAST-FORWARD [F]" if fast_forward else f"RUNNING ({fps:.0f} FPS)")
+            status_str = "PAUSED [Space]" if paused else f"SPEED: {sim_speed}x [F/1-5] ({fps:.0f} FPS)"
             t_sub = small_font.render(f"{status_str} | Rays: {ray_mode.upper()} [D] | HUD: [H]/[O]", True, (160, 175, 195))
             hud_surf.blit(t_sub, (14, yo + 18))
 
@@ -1153,8 +1182,8 @@ def run_maze_simulation(
 if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser(description="Autonomous Swarm Maze Navigation")
-    parser.add_argument("--cols", type=int, default=35, help="Maze columns")
-    parser.add_argument("--rows", type=int, default=22, help="Maze rows")
+    parser.add_argument("--cols", type=int, default=28, help="Maze columns (default: 28 for side-by-side recording)")
+    parser.add_argument("--rows", type=int, default=18, help="Maze rows (default: 18 for side-by-side recording)")
     parser.add_argument("--cell-size", type=float, default=40.0, help="Grid cell size")
     parser.add_argument("--pop-size", type=int, default=80, help="Swarm population size (default: 80)")
     parser.add_argument("--max-steps", type=int, default=2500, help="Max steps per episode")

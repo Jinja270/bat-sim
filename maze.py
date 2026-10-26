@@ -946,7 +946,8 @@ def run_maze_simulation(
             pass
 
     demo_mode = False
-    paused = False
+    started = False if (not headless and steps_limit is None) else True
+    paused = True if not started else False
     sim_speed = 1
     SPEED_OPTIONS = [1, 2, 3, 5]
     show_waves = False
@@ -980,6 +981,19 @@ def run_maze_simulation(
     while running:
         dt = 1.0 / 60.0
 
+        card_w, card_h = 360, 246
+        card_x = max(15, (win_w - card_w) // 2) if win_w < 500 else 15
+        card_y = max(15, win_h - card_h - 15)
+
+        hud_btn_single = pygame.Rect(card_x + 14, card_y + 196, 332, 36)
+        hud_btn_pause = pygame.Rect(card_x + 14, card_y + 196, 160, 36)
+        hud_btn_reset = pygame.Rect(card_x + 186, card_y + 196, 160, 36)
+
+        c_w, c_h = 440, 160
+        c_x = (win_w - c_w) // 2
+        c_y = (win_h - c_h) // 2
+        center_btn_rect = pygame.Rect(c_x + (c_w - 300) // 2, c_y + 86, 300, 46)
+
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 running = False
@@ -987,11 +1001,35 @@ def run_maze_simulation(
                 win_w = max(360, event.w)
                 win_h = max(360, event.h)
                 screen = pygame.display.set_mode((win_w, win_h), pygame.RESIZABLE)
+            elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+                mx, my = event.pos
+                if not started:
+                    if center_btn_rect.collidepoint((mx, my)) or (show_hud and hud_btn_single.collidepoint((mx, my))):
+                        started = True
+                        paused = False
+                else:
+                    if paused:
+                        if show_hud and hud_btn_single.collidepoint((mx, my)):
+                            paused = False
+                    else:
+                        if show_hud and hud_btn_pause.collidepoint((mx, my)):
+                            paused = True
+                        elif show_hud and hud_btn_reset.collidepoint((mx, my)):
+                            pop = MazePopulation(size=pop_size, max_steps=max_steps, scratch=True)
+                            pop.reset_at_maze(maze)
+                            pop.all_time_best_progress = 0.0
+                            pop.stagnant_count = 0
+                            started = True
+                            paused = False
             elif event.type == pygame.KEYDOWN:
                 if event.key == pygame.K_ESCAPE:
                     running = False
                 elif event.key == pygame.K_SPACE:
-                    paused = not paused
+                    if not started:
+                        started = True
+                        paused = False
+                    else:
+                        paused = not paused
                 elif event.key == pygame.K_f:
                     curr_i = SPEED_OPTIONS.index(sim_speed) if sim_speed in SPEED_OPTIONS else 0
                     sim_speed = SPEED_OPTIONS[(curr_i + 1) % len(SPEED_OPTIONS)]
@@ -1151,9 +1189,6 @@ def run_maze_simulation(
                 )
 
         if show_hud:
-            card_w, card_h = 360, 210
-            card_x = max(15, (win_w - card_w) // 2) if win_w < 500 else 15
-            card_y = max(15, win_h - card_h - 15)
             hud_surf = pygame.Surface((card_w, card_h), pygame.SRCALPHA)
             pygame.draw.rect(hud_surf, (15, 20, 30, 230), (0, 0, card_w, card_h), border_radius=8)
             pygame.draw.rect(hud_surf, (0, 240, 160, 240), (0, 0, card_w, card_h), 1, border_radius=8)
@@ -1188,11 +1223,68 @@ def run_maze_simulation(
             if fill_cur > 0 and fill_cur < fill_peak:
                 pygame.draw.rect(hud_surf, (150, 255, 210), (bar_x, bar_y, fill_cur, bar_h), border_radius=3)
 
-            status_str = "PAUSED [Space]" if paused else f"SPEED: {sim_speed}x [F/1-5] ({fps:.0f} FPS)"
+            status_str = "READY [Space]" if not started else ("PAUSED [Space]" if paused else f"SPEED: {sim_speed}x [F/1-5] ({fps:.0f} FPS)")
             t_sub = small_font.render(f"{status_str} | Rays: {ray_mode.upper()} [D] | HUD: [H]/[O]", True, (160, 175, 195))
-            hud_surf.blit(t_sub, (14, yo + 18))
+            hud_surf.blit(t_sub, (14, yo + 16))
+
+            # Clickable Training Control Button(s)
+            by = 196
+            if not started or paused:
+                btn_lbl = "▶  START TRAINING  [Space]" if not started else "▶  RESUME TRAINING  [Space]"
+                pygame.draw.rect(hud_surf, (16, 50, 36), (14, by, 332, 36), border_radius=6)
+                pygame.draw.rect(hud_surf, (0, 240, 160), (14, by, 332, 36), 2, border_radius=6)
+                t_btn = font.render(btn_lbl, True, (0, 240, 160))
+                hud_surf.blit(t_btn, (14 + (332 - t_btn.get_width()) // 2, by + 9))
+            else:
+                pygame.draw.rect(hud_surf, (22, 32, 46), (14, by, 160, 36), border_radius=6)
+                pygame.draw.rect(hud_surf, (70, 160, 240), (14, by, 160, 36), 1, border_radius=6)
+                t_p = font.render("⏸ PAUSE [Space]", True, (110, 195, 255))
+                hud_surf.blit(t_p, (14 + (160 - t_p.get_width()) // 2, by + 9))
+
+                pygame.draw.rect(hud_surf, (45, 22, 28), (186, by, 160, 36), border_radius=6)
+                pygame.draw.rect(hud_surf, (255, 80, 80), (186, by, 160, 36), 1, border_radius=6)
+                t_r = font.render("↺ RESTART [R]", True, (255, 120, 120))
+                hud_surf.blit(t_r, (186 + (160 - t_r.get_width()) // 2, by + 9))
 
             screen.blit(hud_surf, (card_x, card_y))
+
+        # Floating center hero card on launch
+        if not started:
+            center_surf = pygame.Surface((c_w, c_h), pygame.SRCALPHA)
+            pygame.draw.rect(center_surf, (10, 15, 24, 245), (0, 0, c_w, c_h), border_radius=12)
+            pygame.draw.rect(center_surf, (0, 240, 160, 240), (0, 0, c_w, c_h), 2, border_radius=12)
+
+            t_hero = font.render("AUTONOMOUS SWARM NEUROEVOLUTION", True, (0, 240, 160))
+            center_surf.blit(t_hero, ((c_w - t_hero.get_width()) // 2, 20))
+
+            t_desc = small_font.render("Generation 0 from Scratch | Ready for Dual Studio Recording", True, (180, 200, 225))
+            center_surf.blit(t_desc, ((c_w - t_desc.get_width()) // 2, 48))
+
+            cb_w, cb_h = 300, 46
+            cb_x = (c_w - cb_w) // 2
+            cb_y = 86
+            pygame.draw.rect(center_surf, (0, 200, 130), (cb_x, cb_y, cb_w, cb_h), border_radius=8)
+            pygame.draw.rect(center_surf, (255, 255, 255), (cb_x, cb_y, cb_w, cb_h), 2, border_radius=8)
+
+            t_btn_hero = font.render("▶  START TRAINING  (Space)", True, (10, 20, 15))
+            center_surf.blit(t_btn_hero, ((c_w - t_btn_hero.get_width()) // 2, cb_y + 13))
+
+            screen.blit(center_surf, (c_x, c_y))
+
+        mx, my = pygame.mouse.get_pos()
+        hovering = False
+        if not started:
+            if center_btn_rect.collidepoint((mx, my)) or (show_hud and hud_btn_single.collidepoint((mx, my))):
+                hovering = True
+        elif show_hud:
+            if paused and hud_btn_single.collidepoint((mx, my)):
+                hovering = True
+            elif not paused and (hud_btn_pause.collidepoint((mx, my)) or hud_btn_reset.collidepoint((mx, my))):
+                hovering = True
+        try:
+            pygame.mouse.set_cursor(pygame.SYSTEM_CURSOR_HAND if hovering else pygame.SYSTEM_CURSOR_ARROW)
+        except Exception:
+            pass
 
         pygame.display.flip()
         clock.tick(60)

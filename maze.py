@@ -1178,18 +1178,29 @@ def run_maze_simulation(
     sim_log("=" * 75)
 
     resolved_weights = None
+    default_archive = os.path.join(os.path.dirname(__file__), "best_weights_maze.npz")
     if weights_path and os.path.exists(weights_path):
         resolved_weights = weights_path
+    elif os.path.exists("best_weights_maze.npz") and not scratch:
+        resolved_weights = "best_weights_maze.npz"
+    elif os.path.exists(default_archive) and not scratch:
+        resolved_weights = default_archive
 
     champ = None
     if resolved_weights:
         try:
             champ = pop.load_champion(resolved_weights)
+            pop.all_time_best_controller = champ.copy()
+            pop.all_time_best_progress = 1.0
             for d in pop.drones:
                 d.controller = champ.copy()
-            print(f"[Maze] Loaded weights from {resolved_weights}")
-        except Exception:
-            pass
+                d.corridor_bias = 0.0
+                d.speed_multiplier = 1.0
+            pop._sync_vectors()
+            print(f"[Maze] Auto-loaded champion weights from {resolved_weights}")
+            sim_log(f"[INIT] Auto-loaded champion weights from {resolved_weights}")
+        except Exception as e:
+            print(f"[Maze] Error loading weights from {resolved_weights}: {e}")
 
     demo_mode = False
     started = False if (not headless and steps_limit is None) else True
@@ -1300,8 +1311,12 @@ def run_maze_simulation(
                             pass
                         pop.reset_at_maze(maze)
                         if champ is not None:
+                            pop.all_time_best_controller = champ.copy()
                             for d in pop.drones:
                                 d.controller = champ.copy()
+                                d.corridor_bias = 0.0
+                                d.speed_multiplier = 1.0
+                            pop._sync_vectors()
                     else:
                         pop.reset_at_maze(maze)
                 elif event.key == pygame.K_s:
@@ -1318,8 +1333,12 @@ def run_maze_simulation(
                     pop.stagnant_count = 0
                     pop.reset_at_maze(maze)
                     if demo_mode and champ is not None:
+                        pop.all_time_best_controller = champ.copy()
                         for d in pop.drones:
                             d.controller = champ.copy()
+                            d.corridor_bias = 0.0
+                            d.speed_multiplier = 1.0
+                        pop._sync_vectors()
                 elif event.key == pygame.K_w:
                     show_waves = not show_waves
                 elif event.key == pygame.K_d:
@@ -1557,8 +1576,9 @@ if __name__ == "__main__":
     parser.add_argument("--rows", type=int, default=23, help="Maze rows (default: 23 for side-by-side recording)")
     parser.add_argument("--cell-size", type=float, default=38.0, help="Grid cell size")
     parser.add_argument("--pop-size", type=int, default=80, help="Swarm population size (default: 80)")
-    parser.add_argument("--max-steps", type=int, default=2500, help="Max steps per episode")
-    parser.add_argument("--weights", type=str, default=None, help="Weights file to load")
+    parser.add_argument("--max-steps", type=int, default=8000, help="Max steps per episode (default: 8000)")
+    parser.add_argument("--weights", type=str, default="best_weights_maze.npz", help="Weights file to load (default: best_weights_maze.npz)")
+    parser.add_argument("--scratch", action="store_true", help="Start training from random scratch weights")
     parser.add_argument("--preset", action="store_true", help="Start with hand-crafted biological reflexes instead of scratch")
     parser.add_argument("--neural-window", action="store_true", help="Launch companion neural visualizer window")
     parser.add_argument("--hud-window", action="store_true", help="Launch companion HUD telemetry window")
@@ -1566,6 +1586,7 @@ if __name__ == "__main__":
     parser.add_argument("--headless", action="store_true", help="Run with dummy video driver")
     args = parser.parse_args()
 
+    use_scratch = args.scratch or (args.preset is False and args.weights is not None and not os.path.exists(args.weights))
     run_maze_simulation(
         cols=args.cols,
         rows=args.rows,
@@ -1574,7 +1595,7 @@ if __name__ == "__main__":
         max_steps=args.max_steps,
         steps_limit=args.steps,
         weights_path=args.weights,
-        scratch=(not args.preset),
+        scratch=use_scratch,
         neural_window=args.neural_window,
         hud_window=args.hud_window,
         headless=args.headless,

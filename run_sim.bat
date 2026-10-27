@@ -5,7 +5,7 @@ echo =====================================================================
 echo  Launching Dual Studio: Swarm Maze (Left) + Neural Network (Right)
 echo =====================================================================
 echo.
-python maze.py --neural-window
+python maze.py --neural-window --weights best_weights_maze.npz
 if errorlevel 1 (
     echo.
     echo Simulation exited with an error.

@@ -862,19 +862,20 @@ class MazePopulation:
             d2 = dx * dx + dy * dy
             np.fill_diagonal(d2, 1e9)
 
-            sep_r = 16.0
+            sep_r = 14.0
             mask = d2 < (sep_r * sep_r)
             if np.any(mask):
                 dists = np.sqrt(np.maximum(d2, 1e-4))
                 overlap = (sep_r - dists) * mask
                 inv_d = 1.0 / dists
-                fx = np.clip(np.sum((dx * inv_d) * overlap, axis=1) * 0.15, -1.8, 1.8)
-                fy = np.clip(np.sum((dy * inv_d) * overlap, axis=1) * 0.15, -1.8, 1.8)
+                fx = np.clip(np.sum((dx * inv_d) * overlap, axis=1) * 0.08, -0.6, 0.6)
+                fy = np.clip(np.sum((dy * inv_d) * overlap, axis=1) * 0.08, -0.6, 0.6)
                 for k, i in enumerate(alive_after):
                     d = self.drones[i]
                     nx = d.x + float(fx[k])
                     ny = d.y + float(fy[k])
-                    if not maze.check_collision(nx, ny, d.radius):
+                    # Require a 3.0px safe margin away from walls so repulsion never shoves a drone into collision
+                    if not maze.check_collision(nx, ny, d.radius + 3.0):
                         d.x = nx
                         d.y = ny
                         self.coords[i, 0] = nx
@@ -929,7 +930,7 @@ class MazePopulation:
             new_drones: List[MazeDrone] = []
 
             # 1. Direct unmutated clones of champion finisher(s)
-            num_exact_clones = min(12, self.size)
+            num_exact_clones = max(35, min(self.size - 10, max(len(finishers) * 2, int(self.size * 0.60))))
             for i in range(num_exact_clones):
                 source_finisher = finishers[i % len(finishers)]
                 new_drones.append(MazeDrone(
@@ -940,9 +941,8 @@ class MazePopulation:
                     speed_multiplier=1.0,
                 ))
 
-            # 2. Micro-mutations (70% of swarm): tiny perturbations to optimize speed & path lines
-            target_micro = int(self.size * 0.82)
-            while len(new_drones) < target_micro:
+            # 2. Micro-mutations: fine-tuning flight path with minimal variance and 0 drift
+            while len(new_drones) < self.size:
                 if len(finishers) > 1 and self.rng.random() < 0.40:
                     fa = self.rng.choice(finishers)
                     fb = self.rng.choice(finishers)
@@ -950,29 +950,13 @@ class MazePopulation:
                 else:
                     fa = self.rng.choice(finishers)
                     child_net = fa.controller.copy()
-                child_net.mutate(mutation_rate=0.025, sigma=0.012, rng=self.rng)
-                cb = float(self.rng.uniform(-0.08, 0.08))
-                sm = float(self.rng.uniform(0.92, 1.15))
+                child_net.mutate(mutation_rate=0.015, sigma=0.008, rng=self.rng)
+                sm = float(self.rng.uniform(0.98, 1.05))
                 new_drones.append(MazeDrone(
                     x=0.0, y=0.0, heading=0.0,
                     controller=child_net,
                     drone_id=len(new_drones),
-                    corridor_bias=cb,
-                    speed_multiplier=sm,
-                ))
-
-            # 3. Fine-tuned explorers (remaining slots): slight variation from finishers
-            while len(new_drones) < self.size:
-                fa = self.rng.choice(finishers)
-                child_net = fa.controller.copy()
-                child_net.mutate(mutation_rate=0.05, sigma=0.030, rng=self.rng)
-                cb = float(self.rng.uniform(-0.15, 0.15))
-                sm = float(self.rng.uniform(0.85, 1.20))
-                new_drones.append(MazeDrone(
-                    x=0.0, y=0.0, heading=0.0,
-                    controller=child_net,
-                    drone_id=len(new_drones),
-                    corridor_bias=cb,
+                    corridor_bias=0.0,
                     speed_multiplier=sm,
                 ))
 
@@ -990,7 +974,7 @@ class MazePopulation:
                 f"Peak Progress: 100.0% | Status: {stagnation_action}"
             )
             new_drones = []
-            num_exact_clones = min(12, self.size)
+            num_exact_clones = max(35, int(self.size * 0.65))
             for _ in range(num_exact_clones):
                 new_drones.append(MazeDrone(
                     x=0.0, y=0.0, heading=0.0,
@@ -999,29 +983,15 @@ class MazePopulation:
                     corridor_bias=0.0,
                     speed_multiplier=1.0,
                 ))
-            target_micro = int(self.size * 0.82)
-            while len(new_drones) < target_micro:
-                child_net = self.all_time_best_controller.copy()
-                child_net.mutate(mutation_rate=0.025, sigma=0.012, rng=self.rng)
-                cb = float(self.rng.uniform(-0.08, 0.08))
-                sm = float(self.rng.uniform(0.92, 1.15))
-                new_drones.append(MazeDrone(
-                    x=0.0, y=0.0, heading=0.0,
-                    controller=child_net,
-                    drone_id=len(new_drones),
-                    corridor_bias=cb,
-                    speed_multiplier=sm,
-                ))
             while len(new_drones) < self.size:
                 child_net = self.all_time_best_controller.copy()
-                child_net.mutate(mutation_rate=0.05, sigma=0.030, rng=self.rng)
-                cb = float(self.rng.uniform(-0.15, 0.15))
-                sm = float(self.rng.uniform(0.85, 1.20))
+                child_net.mutate(mutation_rate=0.015, sigma=0.008, rng=self.rng)
+                sm = float(self.rng.uniform(0.98, 1.05))
                 new_drones.append(MazeDrone(
                     x=0.0, y=0.0, heading=0.0,
                     controller=child_net,
                     drone_id=len(new_drones),
-                    corridor_bias=cb,
+                    corridor_bias=0.0,
                     speed_multiplier=sm,
                 ))
             self.last_status_message = "RESTORED FROM GOAL CHAMPION"

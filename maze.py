@@ -121,7 +121,7 @@ class Maze:
         self.dist_start = np.full((self.rows, self.cols), -1.0, dtype=np.float64)
         self.start_to_goal_dist = 1.0
         self.max_corridor_depth = 1.0
-        self.start_pos = (1.5 * self.cell_size, 1.5 * self.cell_size)
+        self.start_pos = (2.5 * self.cell_size, 2.5 * self.cell_size)
         self.goal_pos = ((self.cols - 2.5) * self.cell_size, (self.rows - 2.5) * self.cell_size)
         self.goal_radius = self.cell_size * 1.5
         self.rng = random.Random(seed)
@@ -160,14 +160,16 @@ class Maze:
                             wx, wy = self.rng.choice(walls)
                             self.grid[wy, wx] = 0
 
-        self.grid[1:3, 1:3] = 0
+        self.grid[1:4, 1:4] = 0
         self.grid[-3:-1, -3:-1] = 0
-        self.grid[1, 3] = 0
         self.grid[1, 4] = 0
-        self.grid[3, 1] = 0
+        self.grid[2, 4] = 0
+        self.grid[3, 4] = 0
         self.grid[4, 1] = 0
+        self.grid[4, 2] = 0
+        self.grid[4, 3] = 0
 
-        self.start_pos = (1.5 * self.cell_size, 1.5 * self.cell_size)
+        self.start_pos = (2.5 * self.cell_size, 2.5 * self.cell_size)
         self.goal_pos = ((self.cols - 2.5) * self.cell_size, (self.rows - 2.5) * self.cell_size)
 
         self._compute_distance_field()
@@ -657,15 +659,19 @@ class MazePopulation:
         self.gen_start_best_progress = self.all_time_best_progress
         self.new_record_this_gen = False
         sx, sy = maze.start_pos
-        cols = 8
-        spacing = 5.5
+        cols = 10
+        num_rows = (len(self.drones) + cols - 1) // cols
+        spacing = 3.2
         for i, drone in enumerate(self.drones):
             r = i // cols
             c = i % cols
-            ox = (c - cols / 2.0 + 0.5) * spacing + float(self.rng.uniform(-1.5, 1.5))
-            oy = (r - (len(self.drones) / cols) / 2.0 + 0.5) * spacing + float(self.rng.uniform(-1.5, 1.5))
-            px = sx + float(np.clip(ox, -24.0, 24.0))
-            py = sy + float(np.clip(oy, -24.0, 24.0))
+            ox = (c - (cols - 1) / 2.0) * spacing
+            oy = (r - (num_rows - 1) / 2.0) * spacing
+            px = sx + ox
+            py = sy + oy
+            # Guarantee 100% collision-free spawn:
+            if maze.check_collision(px, py, drone.radius + 2.0):
+                px, py = sx, sy
             head = float(self.rng.uniform(-0.15, 0.15))
             drone.reset(px, py, head)
             self.coords[i, 0] = px
@@ -817,8 +823,8 @@ class MazePopulation:
                 d.stagnant_steps = 0
             else:
                 d.stagnant_steps += 1
-                # 140 steps = ~2.3 seconds of no progress -> kill immediately to prevent stalling
-                if d.stagnant_steps > 140:
+                # 360 steps = ~6.0s grace period for navigation to prevent premature kill
+                if d.time_alive_steps > 180 and d.stagnant_steps > 360:
                     d.is_alive = False
                     d.collided = True
                     continue
@@ -862,8 +868,8 @@ class MazePopulation:
                 dists = np.sqrt(np.maximum(d2, 1e-4))
                 overlap = (sep_r - dists) * mask
                 inv_d = 1.0 / dists
-                fx = np.sum((dx * inv_d) * overlap, axis=1) * 0.35
-                fy = np.sum((dy * inv_d) * overlap, axis=1) * 0.35
+                fx = np.clip(np.sum((dx * inv_d) * overlap, axis=1) * 0.15, -1.8, 1.8)
+                fy = np.clip(np.sum((dy * inv_d) * overlap, axis=1) * 0.15, -1.8, 1.8)
                 for k, i in enumerate(alive_after):
                     d = self.drones[i]
                     nx = d.x + float(fx[k])
